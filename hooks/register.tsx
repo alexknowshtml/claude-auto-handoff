@@ -15,10 +15,10 @@ const BRIEF_DIR = '.claude/state/auto-handoff'
 // threshold it never moves the line; it only matters when the threshold is set below a fresh
 // session's size. A fraction rather than a token count so a low threshold is not pushed far out. The 2026-10-03 live run (threshold 20k, seeded sessions start at ~31k) chained six times
 // without them. Progress, not time: a 15-minute chain cap could block a real session that fills fast.
-// The rest shape the brief: two template files, an optional viewer link and a pattern for files
+// The rest shape the brief: two template files and a pattern for files
 // that never count as edits.
-type Config = { threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; viewerUrl: string; ignoreFiles?: RegExp }
-const DEFAULTS: Config = { threshold: 160_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewerUrl: '' }
+type Config = { threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp }
+const DEFAULTS: Config = { threshold: 160_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md' }
 const GROWTH = 0.25
 const TEMPLATES = [['briefTemplate', DEFAULT_BRIEF_TEMPLATE], ['instructionsTemplate', DEFAULT_INSTRUCTIONS_TEMPLATE]] as const
 let cfg: Config = DEFAULTS
@@ -103,7 +103,6 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number) {
       sessionId,
       // Claude Code keeps transcripts under the cwd with every non-alphanumeric character as '-'.
       transcript: transcriptPath ?? `~/.claude/projects/${cwd.replace(/[^a-zA-Z0-9]/g, '-')}/${sessionId}.jsonl`,
-      viewer: cfg.viewerUrl ? cfg.viewerUrl.replace('{sessionId}', sessionId) : undefined,
       instructions: await template($, 'instructionsTemplate', DEFAULT_INSTRUCTIONS_TEMPLATE),
     }, facts, problem ? undefined : text)
     const briefPath = `${home}/${BRIEF_DIR}/${sessionId}.md`
@@ -205,7 +204,6 @@ export const register: Register = (on, options) => {
     maxUnattended: num(options.maxConsecutiveHandoffs, DEFAULTS.maxUnattended),
     briefTemplate: str(options.briefTemplate, DEFAULTS.briefTemplate),
     instructionsTemplate: str(options.instructionsTemplate, DEFAULTS.instructionsTemplate),
-    viewerUrl: str(options.viewerUrl, ''),
     ignoreFiles: pattern(options.ignoreFiles),
   }
   on('turn.complete', async ($, e, next) => {

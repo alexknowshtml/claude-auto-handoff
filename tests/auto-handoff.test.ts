@@ -216,13 +216,6 @@ describe('auto-handoff', () => {
     expect(written.indexOf('**PRIORITY:')).toBeLessThan(written.indexOf('## Session Handoff Brief'))
   })
 
-  test('viewerUrl adds a viewer link with the session id filled in', { options: { viewerUrl: 'https://example.com/h/{sessionId}' } }, async ($, on) => {
-    const calls = engine(on, { tokens: 165_000 })
-    await $.turn.complete(TURN)
-    await settle(() => calls.cleared > 0)
-    expect(calls.written['/home/test/.claude/state/auto-handoff/old-session.md']).toContain('- **Viewer:** https://example.com/h/old-session')
-  })
-
   test('the brief template file sets the sections Haiku is asked for', async ($, on) => {
     const files = { '/home/test/.claude/auto-handoff/brief.md': 'Write only:\n\n## Mood\nHow it went.' }
     const calls = engine(on, { tokens: 165_000, files, brief: '## Mood\nGood.' })
@@ -263,7 +256,7 @@ describe('auto-handoff', () => {
     expect(hasUnansweredLastRequest('## Next Step\nStatus: Not answered')).toBe(false)
   })
 
-  test('the brief carries the transcript path, viewer link, verify block and facts', async ($, on) => {
+  test('the brief carries the transcript path, verify block and facts', async ($, on) => {
     const messages = [
       msg('user', 'fix #846 please'),
       msg('assistant', 'committing', [edit('/repo/mod.ts', 'Write'), bash("git commit -m 'feat: x'", '[main 47edd8e] feat(mods): auto-handoff\n 2 files changed')]),
@@ -273,7 +266,6 @@ describe('auto-handoff', () => {
     await settle(() => calls.cleared > 0)
     const brief = calls.written['/home/test/.claude/state/auto-handoff/old-session.md']
     expect(brief).toContain('`~/.claude/projects/-home-test-proj/old-session.jsonl`')
-    expect(brief).not.toContain('**Viewer:**') // no viewerUrl set
     expect(brief).toContain('## How to Use This Brief')
     expect(brief).toContain('Finish the parser refactor')
     expect(brief).toContain('- feat(mods): auto-handoff (47edd8e)')

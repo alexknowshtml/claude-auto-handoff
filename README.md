@@ -42,7 +42,6 @@ Every setting is a row in `/config` under auto-handoff. They're stored in `~/.cl
 | `maxConsecutiveHandoffs` | `2` | Handoffs allowed before you type a prompt; past this, the mod pauses until you do |
 | `briefTemplate` | `~/.claude/auto-handoff/brief.md` | The sections Haiku writes |
 | `instructionsTemplate` | `~/.claude/auto-handoff/instructions.md` | How the fresh session should read the brief |
-| `viewerUrl` | blank | Optional link to view the old session; `{sessionId}` is filled in |
 | `ignoreFiles` | blank | Regex for edited files to leave out of the brief, such as caches or synced state |
 
 Environment variables:

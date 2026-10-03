@@ -33,12 +33,6 @@
       "description": "Markdown file that tells the fresh session how to read the brief. Created with the defaults on first run.",
       "default": "~/.claude/auto-handoff/instructions.md"
     },
-    "viewerUrl": {
-      "type": "string",
-      "title": "Viewer link",
-      "description": "Optional link to view the old session, with {sessionId} filled in. Leave blank for none.",
-      "default": ""
-    },
     "ignoreFiles": {
       "type": "string",
       "title": "Ignored files (regex)",

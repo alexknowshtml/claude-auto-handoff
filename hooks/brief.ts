@@ -119,8 +119,6 @@ export type BriefContext = {
   sessionId: string
   /** The session's transcript file. */
   transcript: string
-  /** A link to view the old session, or undefined for none (the viewerUrl setting). */
-  viewer?: string
   /** The instructions template, rendered at the top of the brief. */
   instructions: string
 }
@@ -131,7 +129,7 @@ export function assembleBrief(ctx: BriefContext, facts: Facts, haiku: string | u
 ## Session Handoff Brief
 
 - **Previous Session:** ${ctx.sessionId}
-- **Transcript:** \`${ctx.transcript}\`${ctx.viewer ? `\n- **Viewer:** ${ctx.viewer}` : ''}
+- **Transcript:** \`${ctx.transcript}\`
 
 ## How to Use This Brief
 ${haiku ? 'Haiku wrote the judgment sections from conversation text with tool output abbreviated. The facts sections came from tool calls in code.' : 'Haiku did not return a usable brief, so this holds only facts extracted in code. Read the transcript for the rest.'} Treat every line as a starting point, not a fact. Before acting on anything here, spawn a subagent to verify: run git status, gh pr view, or Read the file directly. If a fact is missing, grep the transcript before asking the user.`
