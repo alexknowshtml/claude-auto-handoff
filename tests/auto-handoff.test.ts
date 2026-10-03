@@ -298,7 +298,7 @@ describe('auto-handoff', () => {
     await $.classic.SessionStart({ source: 'clear' })
     await settle(() => calls.seeded.length > 0)
     await $.turn.complete(TURN) // the seed turn: sets the floor
-    await $.turn.complete(TURN) // still ~31k: below floor + growth
+    await $.turn.complete(TURN) // still ~31k: below floor + growth (a quarter of the threshold)
     await settle(() => false)
     expect(calls.cleared).toBe(1)
 
@@ -356,11 +356,23 @@ describe('auto-handoff', () => {
     expect(calls.cleared).toBe(1)
   })
 
-  test('growth sets how far a seeded session grows before handing off again', { options: { growth: 100_000 } }, async ($, on) => {
-    const calls = engine(on, { tokens: 31_000, env: { AUTO_HANDOFF_TOKENS: '20000' } })
-    await unattendedRounds($, calls, 2) // rounds add 60k, under the 100k growth
+  test('growth is a quarter of the threshold, not a config field', { options: { growth: 1_000_000 } }, async ($, on) => {
+    const calls = engine(on, { tokens: 31_000, env: { AUTO_HANDOFF_TOKENS: '100000' } })
+    calls.tokens = 120_000
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    calls.tokens = 90_000 // floor 90k: the line moves to 115k
+    await $.turn.complete(TURN) // seed turn sets the floor
+    calls.tokens = 110_000
+    await $.turn.complete(TURN)
     await settle(() => false)
-    expect(calls.cleared).toBe(1)
+    expect(calls.cleared).toBe(1) // 110k: past the 100k threshold, short of floor + 25k
+    calls.tokens = 116_000
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 1)
+    expect(calls.cleared).toBe(2) // the ignored growth option did not hold it off
   })
 
   test('progress guard: a typed prompt resumes handoffs', async ($, on) => {

@@ -39,7 +39,6 @@ Every setting is a row in `/config` under auto-handoff. They're stored in `~/.cl
 | Setting | Default | What it does |
 |---|---|---|
 | `threshold` | `160000` | Context tokens that trigger a handoff |
-| `growth` | `50000` | How far a fresh session must grow past its starting size before it can hand off again |
 | `maxConsecutiveHandoffs` | `2` | Handoffs allowed before you type a prompt; past this, the mod pauses until you do |
 | `briefTemplate` | `~/.claude/auto-handoff/brief.md` | The sections Haiku writes |
 | `instructionsTemplate` | `~/.claude/auto-handoff/instructions.md` | How the fresh session should read the brief |

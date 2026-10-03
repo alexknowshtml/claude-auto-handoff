@@ -15,12 +15,6 @@
       "description": "Context size that triggers a handoff. AUTO_HANDOFF_TOKENS overrides it for a test run.",
       "default": 160000
     },
-    "growth": {
-      "type": "number",
-      "title": "Growth before a re-handoff (tokens)",
-      "description": "How far a seeded session must grow past its starting size before it can hand off again.",
-      "default": 50000
-    },
     "maxConsecutiveHandoffs": {
       "type": "number",
       "title": "Handoffs in a row without a message",

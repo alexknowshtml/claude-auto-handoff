@@ -7,16 +7,19 @@ import { DEFAULT_BRIEF_TEMPLATE, DEFAULT_INSTRUCTIONS_TEMPLATE } from './templat
 // wrapper pipes the session and owns the context limit (DISABLE_AUTO_COMPACT), the mod only logs.
 
 const BRIEF_DIR = '.claude/state/auto-handoff'
-// The three numbers are userConfig fields (plugin.json), set in /config. Defaults match the manifest.
+// The two numbers are userConfig fields (plugin.json), set in /config. Defaults match the manifest.
 // threshold: matches HANDOFF_ARM_TOKENS in context-warning.ts.
-// growth and maxUnattended are loop guards. A seeded session must grow this far past its first-turn
-// size before it can hand off again, and at most maxUnattended handoffs may run before the user types
-// a prompt. The 2026-10-03 live run (threshold 20k, seeded sessions start at ~31k) chained six times
+// GROWTH and maxUnattended are loop guards. A seeded session must grow GROWTH of the threshold past
+// its first-turn size before it can hand off again, and at most maxUnattended handoffs may run before
+// the user types a prompt. GROWTH is fixed: seeded sessions start near 45k, so at the default
+// threshold it never moves the line; it only matters when the threshold is set below a fresh
+// session's size. A fraction rather than a token count so a low threshold is not pushed far out. The 2026-10-03 live run (threshold 20k, seeded sessions start at ~31k) chained six times
 // without them. Progress, not time: a 15-minute chain cap could block a real session that fills fast.
 // The rest shape the brief: two template files, an optional viewer link and a pattern for files
 // that never count as edits.
-type Config = { threshold: number; growth: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; viewerUrl: string; ignoreFiles?: RegExp }
-const DEFAULTS: Config = { threshold: 160_000, growth: 50_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewerUrl: '' }
+type Config = { threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; viewerUrl: string; ignoreFiles?: RegExp }
+const DEFAULTS: Config = { threshold: 160_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewerUrl: '' }
+const GROWTH = 0.25
 const TEMPLATES = [['briefTemplate', DEFAULT_BRIEF_TEMPLATE], ['instructionsTemplate', DEFAULT_INSTRUCTIONS_TEMPLATE]] as const
 let cfg: Config = DEFAULTS
 // Origins the engine stamps on a prompt the person sent; the seed arrives as { kind: 'plugin' }.
@@ -184,7 +187,7 @@ function toastHandedOff($: EngineInterface, sessionId: string, fresh: number) {
 async function thresholdFor($: EngineInterface, sessionId: string): Promise<number> {
   // The env var wins so a test run needs no /config change.
   const base = Number(await $.env.get('AUTO_HANDOFF_TOKENS')) || cfg.threshold
-  return sessionId === seededSession ? Math.max(base, (floor ?? 0) + cfg.growth) : base
+  return sessionId === seededSession ? Math.max(base, (floor ?? 0) + Math.round(base * GROWTH)) : base
 }
 
 // A non-positive or non-numeric value falls back to the default rather than handing off at 0.
@@ -199,7 +202,6 @@ function pattern(v: unknown): RegExp | undefined {
 export const register: Register = (on, options) => {
   cfg = {
     threshold: num(options.threshold, DEFAULTS.threshold),
-    growth: num(options.growth, DEFAULTS.growth),
     maxUnattended: num(options.maxConsecutiveHandoffs, DEFAULTS.maxUnattended),
     briefTemplate: str(options.briefTemplate, DEFAULTS.briefTemplate),
     instructionsTemplate: str(options.instructionsTemplate, DEFAULTS.instructionsTemplate),
