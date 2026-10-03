@@ -38,7 +38,7 @@ Every setting is a row in `/config` under auto-handoff. They're stored in `~/.cl
 
 | Setting | Default | What it does |
 |---|---|---|
-| `threshold` | `160000` | Context tokens that trigger a handoff |
+| `threshold` | `160000` | Context tokens that trigger a handoff. Sized for a 200k window: it leaves room for the brief and the turn in flight |
 | `maxConsecutiveHandoffs` | `2` | Handoffs allowed before you type a prompt; past this, the mod pauses until you do |
 | `briefTemplate` | `~/.claude/auto-handoff/brief.md` | The sections Haiku writes |
 | `instructionsTemplate` | `~/.claude/auto-handoff/instructions.md` | How the fresh session should read the brief |
@@ -47,7 +47,7 @@ Every setting is a row in `/config` under auto-handoff. They're stored in `~/.cl
 
 Environment variables:
 
-- `AUTO_HANDOFF_TOKENS=80000` overrides the threshold for one run, which is handy for testing.
+- `AUTO_HANDOFF_TOKENS=60000` overrides the threshold for one run, so you can watch a handoff without filling 160k first.
 - `AUTO_HANDOFF_DISABLE=1` turns the mod off for one session.
 - `DISABLE_AUTO_COMPACT` also turns it off. When something else manages the context limit, such as a wrapper that pipes the session, `/clear` would break that pipe.
 
