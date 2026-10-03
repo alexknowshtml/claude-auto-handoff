@@ -40,8 +40,8 @@ Every setting is a row in `/config` under auto-handoff. They're stored in `~/.cl
 |---|---|---|
 | `threshold` | `160000` | Context tokens that trigger a handoff. Sized for a 200k window: it leaves room for the brief and the turn in flight |
 | `maxConsecutiveHandoffs` | `2` | Handoffs allowed before you type a prompt; past this, the mod pauses until you do |
-| `briefTemplate` | `~/.claude/auto-handoff/brief.md` | The sections Haiku writes |
-| `instructionsTemplate` | `~/.claude/auto-handoff/instructions.md` | How the fresh session should read the brief |
+| `briefTemplate` | `~/.claude/auto-handoff/brief.md` | Your copy of the sections Haiku writes |
+| `instructionsTemplate` | `~/.claude/auto-handoff/instructions.md` | Your copy of what the fresh session is told to do |
 | `ignoreFiles` | blank | Regex for edited files to leave out of the brief, such as caches or synced state |
 
 Environment variables:
@@ -52,18 +52,31 @@ Environment variables:
 
 ## Change the brief's structure and rules
 
-On a session's first start, the mod writes both templates to `~/.claude/auto-handoff/` if they don't exist yet. Edit them, and the next handoff uses your version. Delete a file to get the current default back on the next start.
+The brief is shaped by two markdown files. The defaults live in this repo's [`templates/`](templates/) folder:
 
-**`brief.md`** is the prompt Haiku gets after the transcript. Each `## ` heading is a section of the brief. Add, remove, rename or reorder them. A Haiku reply counts as valid if it contains at least one of your headings.
+- **[`templates/brief.md`](templates/brief.md)** is the prompt Haiku gets after the transcript. Each `## ` heading is a section of the brief.
+- **[`templates/instructions.md`](templates/instructions.md)** goes at the top of the brief and tells the fresh session what to do with it.
 
-**`instructions.md`** goes at the top of the brief and tells the fresh session what to do with it. It has one switch:
+On a session's first start, the mod copies both files to `~/.claude/auto-handoff/` if they aren't there yet. Edit those copies, not the ones in the repo, so a `git pull` never overwrites your changes. The next handoff uses your version.
+
+To get the current default back, delete your copy. The next start copies it fresh. To keep your files somewhere else, point `briefTemplate` or `instructionsTemplate` in `/config` at them.
+
+### Editing `brief.md`
+
+Add, remove, rename or reorder `## ` sections. The text under each heading tells Haiku what to put there. A Haiku reply counts as valid if it contains at least one of your headings. Otherwise the mod falls back to a facts-only brief.
+
+Leave out files and commits sections. The mod adds them from the transcript in code.
+
+### Editing `instructions.md`
+
+It has one switch:
 
 ```md
 {{#priority}}Shown when the last request is not fully answered.{{/priority}}
 {{^priority}}Shown when it is.{{/priority}}
 ```
 
-The priority check reads the brief's `## Last Request from the User` section and its `Status:` line. Keep both in `brief.md` if you want the switch to work.
+The switch reads the brief's `## Last Request from the User` section and its `Status:` line. Keep both in `brief.md` if you want it to work.
 
 ## Logs
 

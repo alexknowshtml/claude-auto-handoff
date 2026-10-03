@@ -2,9 +2,37 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 import type { On, SessionMessage } from 'claude-code'
 import { extractFacts, hasUnansweredLastRequest, isValidBrief } from '../hooks/brief.ts'
-import { DEFAULT_BRIEF_TEMPLATE, renderTemplate } from '../hooks/templates.ts'
+import { renderTemplate } from '../hooks/templates.ts'
 
 type Calls = { compacts: number; steps: number; cleared: number; seeded: string[]; written: Record<string, string>; completes: number; tokens: number; prompts: string[]; toasts: string[]; ran: number }
+
+// The test runs sandboxed, with no file access, so these stand in for the files in templates/:
+// the same headings and switches, shorter prose.
+const SHIPPED_BRIEF = `Write a handoff brief with these sections.
+
+## Work in Progress
+What was being worked on.
+
+## Questions Answered
+Things established.
+
+## Last Request from the User
+Copy "Last Real User Message" verbatim. Then "Status: Answered / Partially answered / Not answered".
+
+## Next Step
+The next action.
+`
+const SHIPPED_INSTRUCTIONS = `## Instructions
+{{#priority}}
+**PRIORITY: The "Last Request from the User" section below is not yet answered. Answer that request as your first action.**
+{{/priority}}
+
+This turn was triggered by the system, not by a user.
+{{#priority}}Do the PRIORITY request and nothing else.{{/priority}}
+{{^priority}}If the brief includes in-progress or pending work, continue that work immediately.{{/priority}}
+
+**You MUST produce a text response before ending your turn.**
+`
 
 const BASIC: SessionMessage[] = [
   { role: 'user', text: 'please refactor the parser', toolUses: [] },
@@ -33,6 +61,9 @@ function engine(on: On, opts: { tokens: number; files?: Record<string, string>; 
   on('session.cwd', async () => ({ value: '/home/test/proj' }))
   on('fs.read', async (_$, e) => {
     const text = calls.written[e.path] ?? opts.files?.[e.path]
+    // The shipped defaults: the real files in the mod's templates/ folder.
+    if (text === undefined && e.path.endsWith("/templates/brief.md")) return { value: SHIPPED_BRIEF }
+    if (text === undefined && e.path.endsWith("/templates/instructions.md")) return { value: SHIPPED_INSTRUCTIONS }
     if (text === undefined) throw new Error(`ENOENT ${e.path}`)
     return { value: text }
   })
@@ -565,7 +596,8 @@ describe('extractFacts', () => {
   })
 
   test('brief validation needs at least one expected section', async () => {
-    expect(isValidBrief('## Next Step\nGo.', DEFAULT_BRIEF_TEMPLATE)).toBe(true)
-    expect(isValidBrief('Sure! Here is a summary.', DEFAULT_BRIEF_TEMPLATE)).toBe(false)
+    const template = '## Work in Progress\nWhat was happening.\n\n## Next Step\nThe next action.'
+    expect(isValidBrief('## Next Step\nGo.', template)).toBe(true)
+    expect(isValidBrief('Sure! Here is a summary.', template)).toBe(false)
   })
 })

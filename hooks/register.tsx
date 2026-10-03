@@ -1,6 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { assembleBrief, briefPrompt, extractFacts, isValidBrief } from './brief.ts'
-import { DEFAULT_BRIEF_TEMPLATE, DEFAULT_INSTRUCTIONS_TEMPLATE } from './templates.ts'
 
 // At the token threshold, Haiku writes a handoff brief, the mod runs /clear, then seeds the
 // fresh session with a pointer to the brief. Interactive terminal sessions only: where a
@@ -20,7 +19,11 @@ const BRIEF_DIR = '.claude/state/auto-handoff'
 type Config = { threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp }
 const DEFAULTS: Config = { threshold: 160_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md' }
 const GROWTH = 0.25
-const TEMPLATES = [['briefTemplate', DEFAULT_BRIEF_TEMPLATE], ['instructionsTemplate', DEFAULT_INSTRUCTIONS_TEMPLATE]] as const
+// Each template's default, a file in the mod's templates/ folder.
+const TEMPLATES = [['briefTemplate', 'brief.md'], ['instructionsTemplate', 'instructions.md']] as const
+type TemplateKey = typeof TEMPLATES[number][0]
+// Used only when the shipped default is unreadable too, so the fresh session still knows what to do.
+const LAST_RESORT_INSTRUCTIONS = '## Instructions\n\nThis turn was triggered by the system, not by a user. Read this brief and continue the work it describes.'
 let cfg: Config = DEFAULTS
 // Origins the engine stamps on a prompt the person sent; the seed arrives as { kind: 'plugin' }.
 const USER_ORIGINS = new Set(['composer', 'bridge'])
@@ -61,22 +64,29 @@ async function log($: EngineInterface, line: string) {
 
 const expand = (path: string, home: string) => path.replace(/^~(?=\/|$)/, home)
 
-// The template file at its configured path, or the built-in default when there is none.
-async function template($: EngineInterface, key: typeof TEMPLATES[number][0], fallback: string): Promise<string> {
+const readText = async ($: EngineInterface, path: string) => {
   try {
-    const text = await $.fs.read(expand(cfg[key], await $.env.get('HOME') ?? ''))
+    const text = await $.fs.read(path)
     if (typeof text === 'string' && text.trim()) return text
   } catch {}
-  return fallback
+  return undefined
+}
+const shipped = ($: EngineInterface, key: TemplateKey) => `${$.plugin.root}/templates/${TEMPLATES.find(t => t[0] === key)![1]}`
+
+// The template file at its configured path, else the default the mod ships, else ''.
+async function template($: EngineInterface, key: TemplateKey): Promise<string> {
+  return await readText($, expand(cfg[key], await $.env.get('HOME') ?? '')) ?? await readText($, shipped($, key)) ?? ''
 }
 
 // A new session writes each template to its path if nothing is there yet, so the files exist
 // to be edited. A file the user wrote is never touched.
 async function writeMissingTemplates($: EngineInterface) {
   const home = await $.env.get('HOME') ?? ''
-  for (const [key, text] of TEMPLATES) {
+  for (const [key] of TEMPLATES) {
     const path = expand(cfg[key], home)
     try { await $.fs.read(path); continue } catch {}
+    const text = await readText($, shipped($, key))
+    if (!text) { await log($, `template default unreadable ${shipped($, key)}`); continue }
     try { await $.fs.write(path, text) } catch (err) { await log($, `template write failed ${path} ${String(err)}`) }
   }
 }
@@ -85,7 +95,7 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number) {
   try {
     const messages = await $.session.messages()
     const facts = extractFacts(messages, cfg.ignoreFiles)
-    const briefTemplate = await template($, 'briefTemplate', DEFAULT_BRIEF_TEMPLATE)
+    const briefTemplate = await template($, 'briefTemplate')
     const result = await $.model.complete({
       model: 'haiku',
       system: 'You summarize coding sessions into precise handoff briefs.',
@@ -103,7 +113,7 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number) {
       sessionId,
       // Claude Code keeps transcripts under the cwd with every non-alphanumeric character as '-'.
       transcript: transcriptPath ?? `~/.claude/projects/${cwd.replace(/[^a-zA-Z0-9]/g, '-')}/${sessionId}.jsonl`,
-      instructions: await template($, 'instructionsTemplate', DEFAULT_INSTRUCTIONS_TEMPLATE),
+      instructions: await template($, 'instructionsTemplate') || LAST_RESORT_INSTRUCTIONS,
     }, facts, problem ? undefined : text)
     const briefPath = `${home}/${BRIEF_DIR}/${sessionId}.md`
     await $.fs.write(briefPath, brief)
