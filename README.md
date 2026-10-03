@@ -1,0 +1,85 @@
+# claude-auto-handoff
+
+A Claude Code mod that hands a long session off to a fresh one before the context fills up. It replaces auto-compact.
+
+At the threshold, Haiku writes a structured handoff brief to disk. Then the mod runs `/clear` and seeds the new session with one line that points at the brief. The fresh session reads the brief and keeps working.
+
+## Why not auto-compact?
+
+Auto-compact summarizes in place, and you can't control what it keeps. A handoff brief has a fixed structure that you can edit. It covers work in progress, decisions, assumptions to verify, dead ends, your last request and whether it was answered, and the next step. The files, commits and issues sections come from the transcript in code, so they don't depend on the model's memory.
+
+## What happens
+
+1. **Threshold.** The mod checks the context size after each turn and before each model request, including tool output that hasn't been measured yet. Once it's past the threshold, the mod refuses new tool calls, so one burst of reads can't overflow the window.
+2. **Brief.** Haiku writes the brief from the transcript. If Haiku fails, a facts-only brief stands in. Briefs go to `~/.claude/state/auto-handoff/<session-id>.md`.
+3. **Clear and seed.** The mod runs `/clear` and sends the fresh session one line: read the brief and follow its Instructions section.
+4. **Toasts.** You see one toast when the threshold trips and one when the new session is measured, such as `↪ handed off · 1a2b3c4d → 5e6f7a8b · 162k → 31k`.
+
+Loop guards stop a fresh session that starts large from handing off again right away. They also cap how many handoffs run in a row before you type something.
+
+## Install
+
+Requires a Claude Code build with mods (function-hook plugins).
+
+```sh
+git clone https://github.com/alexknowshtml/claude-auto-handoff.git ~/claude-auto-handoff
+claude --plugin-dir ~/claude-auto-handoff
+```
+
+To load it in every session, set `CLAUDE_CODE_PLUGIN_DIRS` to the folder in your shell environment, or in the `env` block of `~/.claude/settings.json`:
+
+```json
+{ "env": { "CLAUDE_CODE_PLUGIN_DIRS": "~/claude-auto-handoff" } }
+```
+
+## Configure
+
+Every setting is a row in `/config` under auto-handoff. They're stored in `~/.claude/settings.json` under `pluginConfigs`.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `threshold` | `160000` | Context tokens that trigger a handoff |
+| `growth` | `50000` | How far a fresh session must grow past its starting size before it can hand off again |
+| `maxConsecutiveHandoffs` | `2` | Handoffs allowed before you type a prompt; past this, the mod pauses until you do |
+| `briefTemplate` | `~/.claude/auto-handoff/brief.md` | The sections Haiku writes |
+| `instructionsTemplate` | `~/.claude/auto-handoff/instructions.md` | How the fresh session should read the brief |
+| `viewerUrl` | blank | Optional link to view the old session; `{sessionId}` is filled in |
+| `ignoreFiles` | blank | Regex for edited files to leave out of the brief, such as caches or synced state |
+
+Environment variables:
+
+- `AUTO_HANDOFF_TOKENS=80000` overrides the threshold for one run, which is handy for testing.
+- `AUTO_HANDOFF_DISABLE=1` turns the mod off for one session.
+- `DISABLE_AUTO_COMPACT` also turns it off. When something else manages the context limit, such as a wrapper that pipes the session, `/clear` would break that pipe.
+
+## Change the brief's structure and rules
+
+On a session's first start, the mod writes both templates to `~/.claude/auto-handoff/` if they don't exist yet. Edit them, and the next handoff uses your version. Delete a file to get the current default back on the next start.
+
+**`brief.md`** is the prompt Haiku gets after the transcript. Each `## ` heading is a section of the brief. Add, remove, rename or reorder them. A Haiku reply counts as valid if it contains at least one of your headings.
+
+**`instructions.md`** goes at the top of the brief and tells the fresh session what to do with it. It has one switch:
+
+```md
+{{#priority}}Shown when the last request is not fully answered.{{/priority}}
+{{^priority}}Shown when it is.{{/priority}}
+```
+
+The priority check reads the brief's `## Last Request from the User` section and its `Status:` line. Keep both in `brief.md` if you want the switch to work.
+
+## Logs
+
+Everything the mod does is logged to `~/.claude/state/auto-handoff/auto-handoff.log`.
+
+## Develop
+
+```sh
+claude plugin validate .
+claude plugin test .
+```
+
+The mod hot-reloads when you save while it's loaded with `--plugin-dir`.
+
+## License
+
+MIT

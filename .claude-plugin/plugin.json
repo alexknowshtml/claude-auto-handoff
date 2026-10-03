@@ -1,0 +1,55 @@
+{
+  "name": "auto-handoff",
+  "version": "0.5.0",
+  "description": "Hands a Claude Code session off to a fresh one before the context fills: a Haiku-written brief, /clear, and a seed that points the new session at the brief.",
+  "author": {
+    "name": "Alex Hillman",
+    "url": "https://github.com/alexknowshtml"
+  },
+  "repository": "https://github.com/alexknowshtml/claude-auto-handoff",
+  "license": "MIT",
+  "userConfig": {
+    "threshold": {
+      "type": "number",
+      "title": "Handoff threshold (tokens)",
+      "description": "Context size that triggers a handoff. AUTO_HANDOFF_TOKENS overrides it for a test run.",
+      "default": 160000
+    },
+    "growth": {
+      "type": "number",
+      "title": "Growth before a re-handoff (tokens)",
+      "description": "How far a seeded session must grow past its starting size before it can hand off again.",
+      "default": 50000
+    },
+    "maxConsecutiveHandoffs": {
+      "type": "number",
+      "title": "Handoffs in a row without a message",
+      "description": "Handoffs allowed before you type a prompt. Past this the mod pauses until you send one.",
+      "default": 2
+    },
+    "briefTemplate": {
+      "type": "string",
+      "title": "Brief template file",
+      "description": "Markdown file that tells Haiku which sections to write. Created with the defaults on first run; edit it to change the brief.",
+      "default": "~/.claude/auto-handoff/brief.md"
+    },
+    "instructionsTemplate": {
+      "type": "string",
+      "title": "Instructions template file",
+      "description": "Markdown file that tells the fresh session how to read the brief. Created with the defaults on first run.",
+      "default": "~/.claude/auto-handoff/instructions.md"
+    },
+    "viewerUrl": {
+      "type": "string",
+      "title": "Viewer link",
+      "description": "Optional link to view the old session, with {sessionId} filled in. Leave blank for none.",
+      "default": ""
+    },
+    "ignoreFiles": {
+      "type": "string",
+      "title": "Ignored files (regex)",
+      "description": "Edited files matching this pattern are left out of the brief, such as auto-synced state or caches. Leave blank for none.",
+      "default": ""
+    }
+  }
+}
