@@ -13,7 +13,7 @@ Auto-compact summarizes in place, and you can't control what it keeps. A handoff
 1. **Threshold.** The mod checks the context size after each turn and before each model request, including tool output that hasn't been measured yet. Once it's past the threshold, the mod refuses new tool calls, so one burst of reads can't overflow the window.
 2. **Brief.** Haiku writes the brief from the transcript. If Haiku fails, a facts-only brief stands in. Briefs go to `~/.claude/state/auto-handoff/<session-id>.md`.
 3. **Clear and seed.** The mod runs `/clear` and sends the fresh session one line: read the brief and follow its Instructions section.
-4. **Toasts.** You see one toast when the threshold trips and one when the new session is measured, such as `↪ handed off · 1a2b3c4d → 5e6f7a8b · 162k → 31k`.
+4. **Toasts.** You see one toast when the threshold trips and one when the new session is measured, such as `↪ handed off · 1a2b3c4d → 5e6f7a8b · 162k → 45k`.
 
 Loop guards stop a fresh session that starts large from handing off again right away. They also cap how many handoffs run in a row before you type something.
 
