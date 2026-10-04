@@ -1,5 +1,5 @@
 import { test, expect } from 'claude-code/testing'
-import { linkify } from '../hooks/register.tsx'
+import { linkify } from '../hooks/config.ts'
 
 const PLUGIN = 'auto-handoff'
 const PATH = '/home/me/.claude/state/auto-handoff/dbd019e5-410b-4d91-8db9-6755b2924e48.md'

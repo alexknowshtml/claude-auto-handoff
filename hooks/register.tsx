@@ -5,36 +5,13 @@ import type { Entry } from './viewer.ts'
 import { SERVER_JS, parseAddress } from './server.ts'
 import { isSpinning, panelTree } from './panel.tsx'
 import type { Line, Panel } from './panel.tsx'
+import { BRIEF_DIR, DEFAULTS, LAST_RESORT_INSTRUCTIONS, MIN_HEADROOM, SEED_PREFIX, TEMPLATES, expand, k, linkify, parseConfig, short } from './config.ts'
+import type { Config, TemplateKey } from './config.ts'
 
 // At the token threshold, Haiku writes a handoff brief, the mod runs /clear, then seeds the
 // fresh session with a pointer to the brief. Interactive terminal sessions only: where a
 // wrapper pipes the session and owns the context limit (DISABLE_AUTO_COMPACT), the mod only logs.
 
-const BRIEF_DIR = '.claude/state/auto-handoff'
-// The two numbers are userConfig fields (plugin.json), set in /config. Defaults match the manifest.
-// threshold: matches HANDOFF_ARM_TOKENS in context-warning.ts.
-// MIN_HEADROOM and maxUnattended are loop guards. A seeded session must grow MIN_HEADROOM past its
-// first-turn size (its floor) before it can hand off again, and at most maxUnattended handoffs may
-// run before the user types a prompt. MIN_HEADROOM is fixed: seeded sessions start near 45k, so at
-// the default threshold it never moves the line; it only matters when the threshold is set low.
-// 40k is the empirical line where a seeded session can read its brief and still do real work. The
-// 2026-10-03 live run (threshold 20k, seeded sessions start at ~31k) chained six times with no
-// guard; the 2026-10-04 run (AUTO_HANDOFF_TOKENS=80000 left in a shell, floor ~45k) chained eight
-// times with a guard of a quarter of the threshold, because max(80k, 45k + 20k) is still 80k, and
-// 35k of room goes in reading the brief. Progress, not time: a 15-minute chain cap could block a
-// real session that fills fast.
-// The rest shape the brief: two template files and a pattern for files
-// that never count as edits.
-// viewer: where the mod serves the brief pages, "host:port"; "tailscale" as the host means this
-// machine's Tailscale IP, or 127.0.0.1 without Tailscale. Blank: no server, and the link is the local file.
-type Config = { threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp; viewer: string }
-const DEFAULTS: Config = { threshold: 160_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: 'tailscale:3846' }
-const MIN_HEADROOM = 40_000
-// Each template's default, a file in the mod's templates/ folder.
-const TEMPLATES = [['briefTemplate', 'brief.md'], ['instructionsTemplate', 'instructions.md']] as const
-type TemplateKey = typeof TEMPLATES[number][0]
-// Used only when the shipped default is unreadable too, so the fresh session still knows what to do.
-const LAST_RESORT_INSTRUCTIONS = '## Instructions\n\nThis turn was triggered by the system, not by a user. Read this brief and continue the work it describes.'
 let cfg: Config = DEFAULTS
 // Origins the engine stamps on a prompt the person sent; the seed arrives as { kind: 'plugin' }.
 const USER_ORIGINS = new Set(['composer', 'bridge'])
@@ -47,18 +24,7 @@ const LOG = `~/${BRIEF_DIR}/auto-handoff.log`
 // problem: why the brief is facts only, when Haiku's summary was unusable.
 type Pending = { oldSession: string; briefPath: string; tokens: number; chain: string; link: string; problem?: string }
 
-// The seed prompt's first characters; the render hook knows the seed row by them.
-const SEED_PREFIX = '[auto-handoff] ↪ Handoff from session'
-// The seed text with its brief path and viewer URL as markdown links. The path becomes a
-// file: link labelled by its file name; the URL links to itself. Exported for the test.
-export function linkify(text: string): string {
-  return text
-    .replace(/(?<=\bat )(\/\S+\.md)(?=[\s)]|$)/, (p) => `[${p.slice(p.lastIndexOf('/') + 1)}](file://${p})`)
-    .replace(/(https?:\/\/[^\s)]+)/, (u) => `[${u}](${u})`)
-}
 
-const k = (n: number) => `${Math.round(n / 1000)}k`
-const short = (sessionId: string) => sessionId.slice(0, 8)
 
 // Module variables survive /clear; $.state does not.
 let pending: Pending | undefined
@@ -93,7 +59,6 @@ async function log($: EngineInterface, line: string) {
   } catch {}
 }
 
-const expand = (path: string, home: string) => path.replace(/^~(?=\/|$)/, home)
 
 const readText = async ($: EngineInterface, path: string) => {
   try {
@@ -439,24 +404,9 @@ async function warnTightThreshold($: EngineInterface, sessionId: string) {
   addStep($, { mark: 'warn', text: `threshold ${k(base)} (${source}) ${left} this session's ${k(floor)} start: handing off at ${k(floor + MIN_HEADROOM)} instead` }, { mark: 'warn', text: 'auto-handoff' }, true)
 }
 
-// A non-positive or non-numeric value falls back to the default rather than handing off at 0.
-const num = (v: unknown, fallback: number) => typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : fallback
-const str = (v: unknown, fallback: string) => typeof v === 'string' && v.trim() ? v.trim() : fallback
-// A bad pattern is dropped, not fatal: a typo in /config should not stop handoffs.
-function pattern(v: unknown): RegExp | undefined {
-  if (typeof v !== 'string' || !v.trim()) return undefined
-  try { return new RegExp(v) } catch { return undefined }
-}
 
 export const register: Register = (on, options) => {
-  cfg = {
-    threshold: num(options.threshold, DEFAULTS.threshold),
-    maxUnattended: num(options.maxConsecutiveHandoffs, DEFAULTS.maxUnattended),
-    briefTemplate: str(options.briefTemplate, DEFAULTS.briefTemplate),
-    instructionsTemplate: str(options.instructionsTemplate, DEFAULTS.instructionsTemplate),
-    ignoreFiles: pattern(options.ignoreFiles),
-    viewer: typeof options.viewer === 'string' ? options.viewer.trim() : DEFAULTS.viewer,
-  }
+  cfg = parseConfig(options)
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     try {
