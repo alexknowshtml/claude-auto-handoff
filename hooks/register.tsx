@@ -78,6 +78,11 @@ let lineage: Lineage | undefined
 // response's own output. turn.complete alone missed a turn whose reads jumped from 63k
 // straight past the window, because the request that would have measured it failed.
 let unmeasured = 0
+// The session whose tool call the gate refused. The refusal tells the model a handoff is coming,
+// so one must follow even when the next response measures under the threshold: the gate counts
+// tool output at CHARS_PER_TOKEN, which ran high in a live test (projected 83.7k, measured 72.5k)
+// and left a session that stopped working with no handoff.
+let gated: string | undefined
 // From the latest SessionStart; /clear starts a new transcript file.
 let transcriptPath: string | undefined
 
@@ -289,6 +294,7 @@ async function tryHandoff($: EngineInterface, sessionId: string, tokens: number,
   unattended++
 
   inFlight = true
+  gated = undefined
   await $.store.set(`fired:${sessionId}`, 'briefing')
   await log($, `threshold session=${sessionId} tokens=${tokens} threshold=${threshold} via=${via}`)
   showPanel($, { header: { mark: 'spin', text: `auto-handoff · ${k(tokens)} / ${k(threshold)}` }, steps: [{ mark: 'spin', text: 'writing brief' }] },
@@ -458,8 +464,8 @@ export const register: Register = (on, options) => {
         return r
       }
       const threshold = await thresholdFor($, sessionId)
-      if (tokens < threshold) return r
-      await tryHandoff($, sessionId, tokens, threshold, 'turn.complete')
+      if (tokens < threshold && gated !== sessionId) return r
+      await tryHandoff($, sessionId, tokens, threshold, gated === sessionId ? 'turn.complete gated' : 'turn.complete')
     } catch (err) {
       await log($, `turn.complete error ${String(err)}`)
     }
@@ -478,6 +484,7 @@ export const register: Register = (on, options) => {
         const projected = (tokens ?? 0) + unmeasured
         const threshold = await thresholdFor($, sessionId)
         if (inFlight || pending || (tokens !== undefined && projected >= threshold && await canHandOff($, sessionId))) {
+          if (!inFlight && !pending) gated = sessionId
           await log($, `tool refused session=${sessionId} tool=${e.tool} projected=${projected} threshold=${threshold}`)
           return { deny: `[auto-handoff] Not run: the context is past the handoff threshold (${k(projected)} ≥ ${k(threshold)}). This session is handing off to a fresh one, which will redo this call. Make no more tool calls.` }
         }
@@ -502,9 +509,14 @@ export const register: Register = (on, options) => {
         if (tokens !== undefined && !isSeedTurn) {
           const projected = tokens + unmeasured
           const threshold = await thresholdFor($, sessionId)
-          if (projected >= threshold && await tryHandoff($, sessionId, projected, threshold, `turn.step measured=${tokens}`)) {
+          const isGated = gated === sessionId
+          if ((projected >= threshold || isGated) && await tryHandoff($, sessionId, projected, threshold, `turn.step measured=${tokens}${isGated ? ' gated' : ''}`)) {
             unmeasured = 0
-            yield { kind: 'text', index: 0, text: `[auto-handoff] The next request would carry about ${Math.round(projected / 1000)}k tokens (threshold ${Math.round(threshold / 1000)}k). Stopping this turn to hand off to a fresh session.` }
+            // A gated session can measure under the threshold here; "would carry" a number below it reads as a bug.
+            const why = projected >= threshold
+              ? `The next request would carry about ${Math.round(projected / 1000)}k tokens (threshold ${Math.round(threshold / 1000)}k).`
+              : `A tool call was refused at the handoff threshold (${Math.round(threshold / 1000)}k).`
+            yield { kind: 'text', index: 0, text: `[auto-handoff] ${why} Stopping this turn to hand off to a fresh session.` }
             yield { kind: 'stop', stopReason: 'end_turn', usage: null }
             return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null }
           }
@@ -584,6 +596,8 @@ export const register: Register = (on, options) => {
       await writeMissingTemplates($)
       await keepServing($)
     }
+    // A /clear of the person's own leaves no handoff to report; the panel from the last one goes too.
+    if (e.source === 'clear' && !pending && !inFlight && shown) hidePanel($)
     if (e.source !== 'clear' || !pending) return r
     const p = pending
     pending = undefined

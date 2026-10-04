@@ -695,6 +695,64 @@ describe('auto-handoff', () => {
     expect(calls.compacts).toBe(0)
   })
 
+  test('a refused tool call hands off at turn end even when the real size comes in under the threshold', async ($, on) => {
+    // Seen live: the gate projected 83.7k, the response measured 72.5k, and the session stopped with no handoff.
+    const calls = engine(on, { tokens: 67_000, env: { AUTO_HANDOFF_TOKENS: '80000' }, toolChars: 220_000 })
+    await $.tool.call({ tool: 'Read', file_path: '/a.txt' })
+    const refused = await $.tool.call({ tool: 'Read', file_path: '/b.txt' })
+    expect('deny' in refused && refused.deny?.includes('[auto-handoff] Not run')).toBe(true)
+    calls.tokens = 72_500
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    expect(calls.cleared).toBe(1)
+  })
+
+  test('a refused tool call hands off at the next request, and the stop line does not claim a size under the threshold', async ($, on) => {
+    const calls = engine(on, { tokens: 84_000, env: { AUTO_HANDOFF_TOKENS: '80000' } })
+    const refused = await $.tool.call({ tool: 'Read', file_path: '/a.txt' })
+    expect('deny' in refused).toBe(true)
+    calls.tokens = 72_500 // the next measurement comes in under the threshold
+    const chunks = await step($)
+    expect(calls.steps).toBe(0)
+    const text = chunks.map(c => c.text ?? '').join('')
+    expect(text).toContain('A tool call was refused at the handoff threshold (80k)')
+    expect(text).not.toContain('would carry')
+    await settle(() => calls.cleared > 0)
+    expect(calls.cleared).toBe(1)
+  })
+
+  test('without a refusal, a turn that ends under the threshold does not hand off', async ($, on) => {
+    const calls = engine(on, { tokens: 67_000, env: { AUTO_HANDOFF_TOKENS: '80000' }, toolChars: 4_000 })
+    await $.tool.call({ tool: 'Read', file_path: '/a.txt' })
+    await $.turn.complete(TURN)
+    await settle(() => false)
+    expect(calls.cleared).toBe(0)
+  })
+
+  test("the person's own /clear dismisses the panel when no handoff is under way", async ($, on) => {
+    const calls = engine(on, { tokens: 165_000, stepUsage: true, brief: null })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    calls.tokens = 47_000
+    await step($, 0)
+    await clock.advance(10_000)
+    expect(await band($)).toContain('⚠ brief is facts only') // sticky
+    await $.classic.SessionStart({ source: 'clear' })
+    expect(await band($)).toBe('')
+    expect(calls.seeded.length).toBe(1)
+  })
+
+  test('the handoff\'s own /clear keeps the panel', async ($, on) => {
+    const calls = engine(on, { tokens: 165_000 })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    expect(await band($)).toContain('✓ cleared')
+  })
+
   test('the tool gate never blocks a session the mod will not hand off', async ($, on) => {
     const calls = engine(on, { tokens: 165_000, env: { AUTO_HANDOFF_DISABLE: 'x' }, toolChars: 220_000 })
     await $.tool.call({ tool: 'Read', file_path: '/a.txt' })
