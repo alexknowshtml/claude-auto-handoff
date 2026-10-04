@@ -18,6 +18,10 @@ http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' })
     res.end(data)
   })
+}).on('error', (err) => {
+  // Another session already serves the folder on this port: nothing to do, and no stack trace.
+  if (err.code === 'EADDRINUSE') { console.log('viewer port ' + port + ' already served'); process.exit(0) }
+  throw err
 }).listen(Number(port), host, () => console.log('viewer serving http://' + host + ':' + port))
 `
 

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 import { chainOf, parseBrief, renderPage, sections, viewerLink, withHeader } from '../hooks/viewer.ts'
+import { SERVER_JS } from '../hooks/server.ts'
 
 describe('viewer', () => {
   test('parseBrief extracts header and body', () => {
@@ -97,5 +98,13 @@ Also don't read`
     expect(chainOf(entries, 'd').map(x => x.id)).toEqual(['a', 'b', 'c', 'd'])
     expect(chainOf(entries, 'a').map(x => x.id)).toEqual(['a', 'b', 'c', 'd'])
     expect(chainOf(entries, 'x').map(x => x.id)).toEqual(['x'])
+  })
+
+  // A second session finds the port taken. Its child used to die with an unhandled EADDRINUSE
+  // stack trace in the log; it now says so in one line and exits 0. (Run live: see the 0.8.2 commit.)
+  test('the server exits quietly when the port is taken', () => {
+    expect(SERVER_JS).toContain("err.code === 'EADDRINUSE'")
+    expect(SERVER_JS).toContain('process.exit(0)')
+    expect(SERVER_JS.indexOf(".on('error'")).toBeLessThan(SERVER_JS.indexOf('.listen('))
   })
 })
