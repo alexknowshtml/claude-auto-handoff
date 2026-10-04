@@ -158,3 +158,30 @@ ${haiku ? 'Haiku wrote the judgment sections from conversation text with tool ou
   // A valid Haiku brief already quotes the last request in its own section.
   return [header, haiku?.trim(), factsBlock(facts, !haiku)].filter(Boolean).join('\n\n')
 }
+
+// A token figure: "93k", "93.1k", "93,105 tokens", "93105 tokens".
+const TOKEN_FIGURE = /\b(\d{1,4}(?:\.\d+)?)k\b|\b(\d{1,3}(?:,\d{3})+|\d{4,7})(?= tokens\b)/gi
+
+const figureValue = (k?: string, whole?: string) => k !== undefined ? Number(k) * 1000 : Number(whole!.replace(/,/g, ''))
+
+/**
+ * Marks every token figure in Haiku's text that the Handoff Numbers block does not hold, within
+ * rounding to the nearest thousand. The template asks Haiku to copy those numbers; this makes it a
+ * rule. Figures are marked, not removed, so the next session sees what was claimed and that it is
+ * unchecked. With no numbers block, every figure is marked.
+ */
+export function markUnverifiedFigures(text: string, f: Facts): { text: string; flagged: string[] } {
+  const block = handoffNumbersBlock(f)
+  const allowed = [
+    ...[...block.matchAll(/\b(\d{1,4}(?:\.\d+)?)k\b/g)].map(m => figureValue(m[1])),
+    ...[...block.matchAll(/\b\d{4,7}\b/g)].map(m => Number(m[0])),
+  ]
+  const flagged: string[] = []
+  const marked = text.replace(TOKEN_FIGURE, (match: string, k?: string, whole?: string) => {
+    const value = figureValue(k, whole)
+    if (allowed.some(a => Math.abs(a - value) < 1000)) return match
+    flagged.push(match)
+    return `${match} [unverified: not in Handoff Numbers]`
+  })
+  return { text: marked, flagged }
+}

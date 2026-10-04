@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 import type { On, SessionMessage } from 'claude-code'
-import { briefPrompt, extractFacts, factsBlock, hasUnansweredLastRequest, isValidBrief } from '../hooks/brief.ts'
+import { briefPrompt, extractFacts, factsBlock, hasUnansweredLastRequest, isValidBrief, markUnverifiedFigures } from '../hooks/brief.ts'
 import { renderTemplate } from '../hooks/templates.ts'
 import { parseBrief } from '../hooks/viewer.ts'
 
@@ -839,5 +839,25 @@ describe('handoff numbers', () => {
 
   test('no numbers, no section', () => {
     expect(factsBlock(base)).not.toContain('Handoff Numbers')
+  })
+})
+
+describe('markUnverifiedFigures', () => {
+  const facts = { filesModified: [], commits: [], issues: [], handoffTokens: 93_105, threshold: 85_141, thresholdSource: 'AUTO_HANDOFF_TOKENS (80k), raised to leave 40k above the starting size', seededSessionStartSize: 45_141 }
+
+  test('marks an invented figure and leaves the real ones alone', () => {
+    const r = markUnverifiedFigures('Low: session burned its 200k budget. It handed off at 93k of 85k, from 80k with 40k room over a 45,141 tokens start.', facts)
+    expect(r.flagged).toEqual(['200k'])
+    expect(r.text).toContain('200k [unverified: not in Handoff Numbers]')
+    expect(r.text).toContain('at 93k of 85k')
+    expect(r.text).not.toContain('45,141 tokens [unverified')
+  })
+
+  test('rounding to the nearest thousand passes; issue numbers and years are not figures', () => {
+    expect(markUnverifiedFigures('93.1k tokens, see #2 and PR 2026', facts).flagged).toEqual([])
+  })
+
+  test('with no numbers block, any figure is marked', () => {
+    expect(markUnverifiedFigures('at 120k', { filesModified: [], commits: [], issues: [] }).flagged).toEqual(['120k'])
   })
 })

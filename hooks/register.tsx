@@ -1,5 +1,5 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
-import { assembleBrief, briefPrompt, extractFacts, isValidBrief } from './brief.ts'
+import { assembleBrief, briefPrompt, extractFacts, isValidBrief, markUnverifiedFigures } from './brief.ts'
 import { chainOf, parseBrief, renderPage, viewerLink, withHeader } from './viewer.ts'
 import type { Entry } from './viewer.ts'
 import { SERVER_JS, parseAddress } from './server.ts'
@@ -237,6 +237,8 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     const text = result.isAnswered ? result.text : ''
     const problem = !result.isAnswered ? result.reason : !text.trim() ? 'empty' : !isValidBrief(text, briefTemplate) ? 'no-sections' : undefined
     if (problem) await log($, `haiku brief unusable session=${sessionId} reason=${problem}; using facts-only brief`)
+    const checked = markUnverifiedFigures(text, facts)
+    if (!problem && checked.flagged.length) await log($, `brief figures not in Handoff Numbers session=${sessionId}: ${checked.flagged.join(', ')}`)
     const home = await $.env.get('HOME')
     const cwd = await $.session.cwd()
     const brief = assembleBrief({
@@ -244,7 +246,7 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
       // Claude Code keeps transcripts under the cwd with every non-alphanumeric character as '-'.
       transcript: transcriptPath ?? `~/.claude/projects/${cwd.replace(/[^a-zA-Z0-9]/g, '-')}/${sessionId}.jsonl`,
       instructions: await template($, 'instructionsTemplate') || LAST_RESORT_INSTRUCTIONS,
-    }, facts, problem ? undefined : text)
+    }, facts, problem ? undefined : checked.text)
     const briefDir = `${home}/${BRIEF_DIR}`
     const briefPath = `${briefDir}/${sessionId}.md`
     const pagesDir = `${briefDir}/pages`
