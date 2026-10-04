@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { parseBrief, withHeader, viewerLink, parseServe, sections } from '../hooks/viewer.ts'
+import { parseBrief, renderPage, sections, viewerLink, withHeader } from '../hooks/viewer.ts'
 
 describe('viewer', () => {
   test('parseBrief extracts header and body', () => {
@@ -39,25 +39,18 @@ Test it.`
     expect(b2).toBe(body)
   })
 
-  test('viewerLink formats the URL correctly', () => {
-    const url = viewerLink('http://example.com/{sessionId}', '', '', 'abc12345')
-    expect(url).toBe('http://example.com/abc12345')
+  test('viewerLink is the served page, or the local file with no server', () => {
+    expect(viewerLink({ host: '100.64.0.1', port: '3846' }, '/pages', 'abc12345')).toBe('http://100.64.0.1:3846/abc12345.html')
+    expect(viewerLink(undefined, '/pages', 'abc12345')).toBe('file:///pages/abc12345.html')
   })
 
-  test('viewerLink defaults to tailscale serve address', () => {
-    const url = viewerLink('', '100.85.122.99:3846', '/pages', 'abc12345')
-    expect(url).toBe('http://100.85.122.99:3846/abc12345.html')
-  })
-
-  test('parseServe validates host:port', () => {
-    const result = parseServe('100.85.122.99:3846')
-    expect(result).toEqual({ host: '100.85.122.99', port: '3846' })
-
-    const ipv6 = parseServe('[::1]:3000')
-    expect(ipv6).toEqual({ host: '::1', port: '3000' })
-
-    const bad = parseServe('not-a-host')
-    expect(bad).toBeUndefined()
+  test('renderPage links the chain and escapes a brief that tries to close the script tag', () => {
+    const a = { id: 'aaaaaaaa-1', header: { chain: 'aaaaaaaa-1', at: '2026-10-04T00:00:00Z', to: 'bbbbbbbb-2' }, body: '## Work in Progress\nFirst.' }
+    const b = { id: 'bbbbbbbb-2', header: { chain: 'aaaaaaaa-1', from: 'aaaaaaaa-1', at: '2026-10-04T01:00:00Z' }, body: '## Next Step\n</script><b>x</b>' }
+    const page = renderPage(b, [a, b])
+    expect(page).toContain('href="aaaaaaaa-1.html"')
+    expect(page).toContain('Handoff Chain')
+    expect(page).not.toContain('</script><b>')
   })
 
   test('sections extracts visible sections', () => {

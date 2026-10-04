@@ -3,8 +3,6 @@
 // share a chain id are one run of handoffs, and every page in a chain lists all of them.
 // The page renders the brief's markdown in the browser from a CDN, so the mod ships no packages.
 
-import type { EngineInterface } from 'claude-code'
-
 export type Header = { from?: string; to?: string; chain?: string; tokens?: string; at?: string; cwd?: string; viewer?: string }
 export type Entry = { id: string; header: Header; body: string }
 
@@ -146,24 +144,4 @@ export function renderPage(entry: Entry, chain: readonly Entry[]): string {
 </body>
 </html>
 `
-}
-
-/** Writes the page of every brief in sessionId's chain, so each page lists the whole chain. */
-export async function writeChainPages($: EngineInterface, briefDir: string, pagesDir: string, sessionId: string): Promise<void> {
-  const own = await $.fs.read(`${briefDir}/${sessionId}.md`)
-  if (typeof own !== 'string') return
-  const chainId = parseBrief(own).header.chain || sessionId
-  const chain: Entry[] = []
-  for (const f of await $.fs.list(briefDir)) {
-    if (f.kind !== 'file' || !f.name.endsWith('.md')) continue
-    const id = f.name.slice(0, -3)
-    try {
-      const text = await $.fs.read(`${briefDir}/${f.name}`)
-      if (typeof text !== 'string') continue
-      const { header, body } = parseBrief(text)
-      if ((header.chain || id) === chainId) chain.push({ id, header, body })
-    } catch {}
-  }
-  chain.sort((a, b) => (a.header.at ?? '').localeCompare(b.header.at ?? ''))
-  for (const e of chain) await $.fs.write(`${pagesDir}/${e.id}.html`, renderPage(e, chain))
 }

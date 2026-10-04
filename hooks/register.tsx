@@ -1,7 +1,8 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { assembleBrief, briefPrompt, extractFacts, isValidBrief } from './brief.ts'
-import { parseBrief, viewerLink, withHeader, writeChainPages } from './viewer.ts'
-import { ensureServer, resolveServe } from './server.ts'
+import { parseBrief, renderPage, viewerLink, withHeader } from './viewer.ts'
+import type { Entry } from './viewer.ts'
+import { SERVER_JS, parseAddress } from './server.ts'
 
 // At the token threshold, Haiku writes a handoff brief, the mod runs /clear, then seeds the
 // fresh session with a pointer to the brief. Interactive terminal sessions only: where a
@@ -97,8 +98,55 @@ async function writeMissingTemplates($: EngineInterface) {
   }
 }
 
-async function serveAddress($: EngineInterface) {
-  return cfg.viewer ? await resolveServe($, cfg.viewer) : undefined
+// The viewer server's address: the Tailscale host resolved to this machine's IPv4.
+async function serveAddress($: EngineInterface): Promise<{ host: string; port: string } | undefined> {
+  const addr = cfg.viewer ? parseAddress(cfg.viewer) : undefined
+  if (!addr || addr.host !== 'tailscale') return addr
+  try {
+    const { exitCode, stdout } = await $.process.run(['tailscale', 'ip', '-4'])
+    const ip = stdout.trim().split('\n')[0]?.trim()
+    return exitCode === 0 && ip ? { host: ip, port: addr.port } : undefined
+  } catch {
+    return undefined
+  }
+}
+
+let serving = false
+// Starts the server unless this module already runs one. The spawn loop is the child's life: it
+// runs on after the caller returns and ends with the child or the module. A second session finds
+// the port taken, its child exits, and the first session's server keeps serving the same folder.
+function ensureServer($: EngineInterface, pagesDir: string, addr: { host: string; port: string }) {
+  if (serving) return
+  serving = true
+  void (async () => {
+    try {
+      for await (const { text } of $.process.spawn({ argv: ['node', '-e', SERVER_JS, pagesDir, addr.host, addr.port] })) await log($, text.trim())
+    } catch (err) {
+      await log($, `viewer server failed ${String(err)}`)
+    } finally {
+      serving = false
+    }
+  })()
+}
+
+/** Writes the page of every brief in sessionId's chain, so each page lists the whole chain. */
+async function writeChainPages($: EngineInterface, briefDir: string, pagesDir: string, sessionId: string): Promise<void> {
+  const own = await $.fs.read(`${briefDir}/${sessionId}.md`)
+  if (typeof own !== 'string') return
+  const chainId = parseBrief(own).header.chain || sessionId
+  const chain: Entry[] = []
+  for (const f of await $.fs.list(briefDir)) {
+    if (f.kind !== 'file' || !f.name.endsWith('.md')) continue
+    const id = f.name.slice(0, -3)
+    try {
+      const text = await $.fs.read(`${briefDir}/${f.name}`)
+      if (typeof text !== 'string') continue
+      const { header, body } = parseBrief(text)
+      if ((header.chain || id) === chainId) chain.push({ id, header, body })
+    } catch {}
+  }
+  chain.sort((a, b) => (a.header.at ?? '').localeCompare(b.header.at ?? ''))
+  for (const e of chain) await $.fs.write(`${pagesDir}/${e.id}.html`, renderPage(e, chain))
 }
 
 // Writes the pages for sessionId's chain and makes sure the server is up. Returns the page's
@@ -108,7 +156,7 @@ async function viewer($: EngineInterface, briefDir: string, pagesDir: string, se
     await $.process.run(['mkdir', '-p', pagesDir])
     await writeChainPages($, briefDir, pagesDir, sessionId)
     const addr = await serveAddress($)
-    if (addr) ensureServer($, pagesDir, addr, line => log($, line))
+    if (addr) ensureServer($, pagesDir, addr)
     return viewerLink(addr, pagesDir, sessionId)
   } catch (err) {
     await log($, `viewer error session=${sessionId} ${String(err)}`)
@@ -374,7 +422,7 @@ export const register: Register = (on, options) => {
       if (!await paneVar($)) {
         const addr = await serveAddress($)
         const home = await $.env.get('HOME')
-        if (addr && home) ensureServer($, `${home}/${BRIEF_DIR}/pages`, addr, line => log($, line))
+        if (addr && home) ensureServer($, `${home}/${BRIEF_DIR}/pages`, addr)
       }
     }
     if (e.source !== 'clear' || !pending) return r

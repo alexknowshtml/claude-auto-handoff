@@ -3,6 +3,7 @@ import type { TestBody } from 'claude-code/testing'
 import type { On, SessionMessage } from 'claude-code'
 import { extractFacts, hasUnansweredLastRequest, isValidBrief } from '../hooks/brief.ts'
 import { renderTemplate } from '../hooks/templates.ts'
+import { parseBrief } from '../hooks/viewer.ts'
 
 type Calls = { compacts: number; steps: number; cleared: number; seeded: string[]; written: Record<string, string>; completes: number; tokens: number; prompts: string[]; toasts: string[]; ran: number }
 
@@ -81,6 +82,10 @@ function engine(on: On, opts: { tokens: number; files?: Record<string, string>; 
     calls.written[e.path] = e.text
     return { value: undefined }
   })
+  on('fs.list', async (_$, e) => ({
+    value: Object.keys(calls.written).filter(p => p.startsWith(`${e.path}/`) && !p.slice(e.path.length + 1).includes('/'))
+      .map(p => ({ name: p.slice(e.path.length + 1), kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false })),
+  }))
   on('process.run', async () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
   on('ui.toast', async (_$, e) => {
     calls.toasts.push(e.text)
@@ -142,7 +147,7 @@ describe('auto-handoff', () => {
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     expect(calls.completes).toBe(1)
-    expect(Object.keys(calls.written)).toEqual(['/home/test/.claude/state/auto-handoff/old-session.md'])
+    expect(Object.keys(calls.written)).toEqual(['/home/test/.claude/state/auto-handoff/old-session.md', '/home/test/.claude/state/auto-handoff/pages/old-session.html'])
     expect(calls.written['/home/test/.claude/state/auto-handoff/old-session.md']).toContain('Finish the parser refactor')
     expect(calls.cleared).toBe(1)
 
@@ -225,7 +230,7 @@ describe('auto-handoff', () => {
     const calls = engine(on, { tokens: 165_000 })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
-    const brief = calls.written['/home/test/.claude/state/auto-handoff/old-session.md'] ?? ''
+    const brief = parseBrief(calls.written['/home/test/.claude/state/auto-handoff/old-session.md'] ?? '').body
     expect(brief.startsWith('## Instructions')).toBe(true)
     expect(brief).toContain('triggered by the system, not by a user')
     expect(brief).toContain('continue that work immediately')
@@ -234,6 +239,33 @@ describe('auto-handoff', () => {
     await $.classic.SessionStart({ source: 'clear' })
     await settle(() => calls.seeded.length > 0)
     expect(calls.seeded[0]).toContain('follow its Instructions section')
+  })
+
+  test('each brief gets a viewer page, and the chain links forward once the next session hands off', async ($, on) => {
+    const calls = engine(on, { tokens: 165_000 })
+    const dir = '/home/test/.claude/state/auto-handoff'
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    const first = parseBrief(calls.written[`${dir}/old-session.md`] ?? '').header
+    expect(first.chain).toBe('old-session')
+    expect(first.tokens).toBe('165000')
+    expect(calls.written[`${dir}/pages/old-session.html`]).toContain('Session Context')
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    // No Tailscale in the test, so the link is the local file.
+    expect(calls.seeded[0]).toContain(`file://${dir}/pages/old-session.html`)
+    expect(parseBrief(calls.written[`${dir}/old-session.md`] ?? '').header.to).toBe('new-session-1')
+    // The seeded session hands off in turn: same chain, and its brief points back.
+    // The seeded session's first turn sets its floor; the next one past the line hands off.
+    calls.tokens = 47_000
+    await $.turn.complete(TURN)
+    calls.tokens = 260_000
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 1)
+    const second = parseBrief(calls.written[`${dir}/new-session-1.md`] ?? '').header
+    expect(second.chain).toBe('old-session')
+    expect(second.from).toBe('old-session')
+    expect(calls.written[`${dir}/pages/new-session-1.html`]).toContain('href="old-session.html"')
   })
 
   test('an unanswered last request puts a PRIORITY directive in the instructions', async ($, on) => {
@@ -262,7 +294,7 @@ describe('auto-handoff', () => {
     const calls = engine(on, { tokens: 165_000, files: { '/custom/i.md': '## Rules\nJust keep going.' } })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
-    const brief = calls.written['/home/test/.claude/state/auto-handoff/old-session.md'] ?? ''
+    const brief = parseBrief(calls.written['/home/test/.claude/state/auto-handoff/old-session.md'] ?? '').body
     expect(brief.startsWith('## Rules\nJust keep going.')).toBe(true)
   })
 
@@ -510,7 +542,7 @@ describe('auto-handoff', () => {
 
     calls.tokens = 47_000
     await step($, 0) // the seed turn's first request
-    expect(calls.toasts[1]).toBe('↪ handed off · old-sess → new-sess · 165k → 47k')
+    expect(calls.toasts[1]).toBe('↪ handed off · old-sess → new-sess · 165k → 47k · file:///home/test/.claude/state/auto-handoff/pages/old-session.html')
     await step($, 1)
     expect(calls.toasts.length).toBe(2)
   })
