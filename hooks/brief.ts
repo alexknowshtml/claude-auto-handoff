@@ -21,6 +21,10 @@ export type Facts = {
   commits: string[]
   issues: string[]
   lastUserMessage?: string
+  handoffTokens?: number
+  threshold?: number
+  seededSessionStartSize?: number
+  handoffCount?: number
 }
 
 /** The user's own words, or undefined for a harness signal or a tool-result-only message. */
@@ -81,7 +85,20 @@ function list(items: string[], empty: string): string {
   return items.length ? items.map(i => `- ${i}`).join('\n') : empty
 }
 
+function handoffNumbersBlock(f: Facts): string {
+  if (!f.handoffTokens && !f.threshold) return ''
+  const lines = []
+  if (f.handoffTokens !== undefined) lines.push(`- **Tokens at handoff:** ${f.handoffTokens} (${k(f.handoffTokens)})`)
+  if (f.threshold !== undefined) lines.push(`- **Threshold:** ${f.threshold} (${k(f.threshold)})`)
+  if (f.seededSessionStartSize !== undefined) lines.push(`- **Seeded session starting size:** ${f.seededSessionStartSize} (${k(f.seededSessionStartSize)})`)
+  if (f.handoffCount !== undefined) lines.push(`- **Handoff count in chain:** ${f.handoffCount}`)
+  return lines.length ? `## Handoff Numbers\n${lines.join('\n')}\n` : ''
+}
+
+const k = (n: number) => `${Math.round(n / 1000)}k`
+
 export function factsBlock(f: Facts, withLastMessage = true): string {
+  const numbers = handoffNumbersBlock(f)
   const files = `## Files Modified (from Edit/Write calls)
 ${list(f.filesModified, 'None.')}
 
@@ -90,7 +107,8 @@ ${list(f.commits, 'None.')}
 
 ## GitHub Issues Mentioned
 ${f.issues.length ? f.issues.join(', ') : 'None.'}`
-  return withLastMessage ? `${files}\n\n## Last Real User Message (verbatim)\n${f.lastUserMessage ?? 'None found.'}` : files
+  const all = [numbers, files].filter(Boolean).join('\n')
+  return withLastMessage ? `${all}\n\n## Last Real User Message (verbatim)\n${f.lastUserMessage ?? 'None found.'}` : all
 }
 
 export function briefPrompt(messages: readonly SessionMessage[], facts: Facts, template: string): string {

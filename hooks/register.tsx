@@ -60,6 +60,11 @@ export function linkify(text: string): string {
 const k = (n: number) => `${Math.round(n / 1000)}k`
 const short = (sessionId: string) => sessionId.slice(0, 8)
 
+// Count handoffs in a chain string (chain IDs separated by →)
+function countHandoffs(chain: string): number {
+  return chain.split('→').filter(s => s.trim()).length
+}
+
 // Module variables survive /clear; $.state does not.
 let pending: Pending | undefined
 let inFlight = false
@@ -215,10 +220,14 @@ async function storedLineage($: EngineInterface, sessionId: string): Promise<Lin
   }
 }
 
-async function handoff($: EngineInterface, sessionId: string, tokens: number) {
+async function handoff($: EngineInterface, sessionId: string, tokens: number, threshold: number) {
   try {
     const messages = await $.session.messages()
     const facts = extractFacts(messages, cfg.ignoreFiles)
+    facts.handoffTokens = tokens
+    facts.threshold = threshold
+    if (seededSession && floor !== undefined) facts.seededSessionStartSize = floor
+    facts.handoffCount = lineage ? countHandoffs(lineage.chain) : 1
     const briefTemplate = await template($, 'briefTemplate')
     const result = await $.model.complete({
       model: 'haiku',
@@ -300,7 +309,7 @@ async function tryHandoff($: EngineInterface, sessionId: string, tokens: number,
   showPanel($, { header: { mark: 'spin', text: `auto-handoff · ${k(tokens)} / ${k(threshold)}` }, steps: [{ mark: 'spin', text: 'writing brief' }] },
     `context ${k(tokens)} is past ${k(threshold)}: handing off`)
   // Not awaited: the brief can take a while and /clear only runs once the session is idle.
-  handoff($, sessionId, tokens).finally(() => { inFlight = false })
+  handoff($, sessionId, tokens, threshold).finally(() => { inFlight = false })
   return true
 }
 
