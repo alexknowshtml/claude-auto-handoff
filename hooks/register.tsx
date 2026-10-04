@@ -377,6 +377,24 @@ export const register: Register = (on, options) => {
       await $.store.set(`fired:${p.oldSession}`, `seeded:${newSession}`)
       await log($, `seeding new=${newSession} from=${p.oldSession}`)
       handedFrom = { session: p.oldSession, tokens: p.tokens }
+
+      // Update the old brief's header with the handoff link and re-render the chain
+      try {
+        const oldBrief = await $.fs.read(p.briefPath)
+        if (typeof oldBrief === 'string') {
+          const { header, body } = parseBrief(oldBrief)
+          header.from = header.from || p.oldSession
+          header.to = newSession
+          const updatedBrief = withHeader(header, body)
+          await $.fs.write(p.briefPath, updatedBrief)
+          const briefDir = p.briefPath.replace(/\/[^/]+$/, '')
+          const pagesDir = `${briefDir}/pages`
+          await renderAndWrite($, p.briefPath, pagesDir)
+          await log($, `header updated ${p.briefPath} to=${newSession}`)
+        }
+      } catch (err) {
+        await log($, `header update error ${String(err)}`)
+      }
       // One line on screen; the model reads the brief from disk. A full brief as the
       // seed showed up as a wall of text the person never wrote.
       const text = `[auto-handoff] ↪ Handoff from session ${short(p.oldSession)}. The previous session hit its context limit and was cleared. Read the brief at ${p.briefPath} before doing anything else and follow its Instructions section. Open your first reply with the line "↪ Handoff from session ${short(p.oldSession)}".`
