@@ -60,14 +60,21 @@ async function homeDir($: EngineInterface): Promise<string | undefined> {
 }
 
 async function log($: EngineInterface, line: string) {
-  // Through $.fs rather than `sh`, which Windows lacks. $.fs has no append, so the log is read
-  // and rewritten: two lines logged at the same instant can lose one. It keeps the last ~1 MB
-  // so a read never hits $.fs's 4 MiB cap.
   try {
     const path = `${await homeDir($)}/${BRIEF_DIR}/auto-handoff.log`
+    const stamped = `${new Date().toISOString()} ${line}`
+    // Where there is a `sh`, append: an append is atomic, so concurrent sessions and the viewer
+    // server (which appends its own output here) never drop each other's lines.
+    try {
+      const { exitCode } = await $.process.run(['sh', '-c', 'mkdir -p "$(dirname "$2")" && printf "%s\\n" "$1" >> "$2"', 'sh', stamped, path])
+      if (exitCode === 0) return
+    } catch {}
+    // Windows has no `sh`. $.fs has no append, so the log is read and rewritten: two lines logged
+    // at the same instant can lose one. It keeps the last ~500 KB, cut at a line, so a read never
+    // hits $.fs's 4 MiB cap.
     const old = await $.fs.read(path).catch(() => '')
-    const kept = typeof old !== 'string' ? '' : old.length > 1_000_000 ? old.slice(-500_000) : old
-    await $.fs.write(path, `${kept}${new Date().toISOString()} ${line}\n`)
+    const kept = typeof old !== 'string' ? '' : old.length > 1_000_000 ? old.slice(old.indexOf('\n', old.length - 500_000) + 1) : old
+    await $.fs.write(path, `${kept}${stamped}\n`)
   } catch {}
 }
 

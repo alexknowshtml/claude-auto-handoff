@@ -52,11 +52,11 @@ declare const setTimeout: (fn: (...args: never[]) => void, ms: number) => unknow
 // On Windows the engine hands fs hooks "/home/test/x" as "D:\home\test\x";
 // the fake file store keys on the POSIX spelling either way.
 const posix = (p: string) => p.replace(/^[A-Za-z]:/, '').replace(/\\/g, '/')
-// The mod's log goes through fs.write too; assertions about the files a handoff writes skip it.
+// The mod's log lands in the fake file store too (sh append or fs.write); assertions about the files a handoff writes skip it.
 const files = (written: Record<string, string>) => Object.keys(written).filter(p => !p.endsWith('/auto-handoff.log'))
 
 // The engine beneath the plugin: everything the mod calls, answered from memory.
-function engine(on: On, opts: { tokens: number; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[] }): Calls {
+function engine(on: On, opts: { tokens: number; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[]; noSh?: boolean }): Calls {
   const calls: Calls = { compacts: 0, steps: 0, cleared: 0, seeded: [], written: {}, completes: 0, tokens: opts.tokens, prompts: [], toasts: [], ran: 0 }
   let sessionId = 'old-session'
   let clears = 0
@@ -102,7 +102,15 @@ function engine(on: On, opts: { tokens: number; files?: Record<string, string>; 
         .map(p => ({ name: p.slice(dir.length + 1), kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false })),
     }
   })
-  on('process.run', async () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('process.run', async (_$, e) => {
+    // The log's `sh` append: kept in the file store, or refused as on a Windows without `sh`.
+    if (e.argv[0] === 'sh' && e.argv[2]?.includes('>> "$2"')) {
+      if (opts.noSh) throw new Error('ENOENT sh')
+      const path = posix(e.argv[5] ?? '')
+      calls.written[path] = `${calls.written[path] ?? ''}${e.argv[4]}\n`
+    }
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('ui.toast', async (_$, e) => {
     calls.toasts.push(e.text)
     return { value: undefined }
@@ -373,6 +381,15 @@ describe('auto-handoff', () => {
     await settle(() => calls.cleared > 0)
     const brief = parseBrief(calls.written['/home/test/.claude/state/auto-handoff/old-session.md'] ?? '').body
     expect(brief.startsWith('## Rules\nJust keep going.')).toBe(true)
+  })
+
+  test('without sh, the log is written through fs and keeps every line', async ($, on) => {
+    const calls = engine(on, { tokens: 165_000, noSh: true })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    const log = calls.written['/home/test/.claude/state/auto-handoff/auto-handoff.log'] ?? ''
+    expect(log).toContain('threshold session=old-session tokens=165000')
+    expect(log).toContain('brief written /home/test/.claude/state/auto-handoff/old-session.md')
   })
 
   test('a new session writes missing templates and leaves existing ones alone', async ($, on) => {
