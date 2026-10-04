@@ -1,6 +1,6 @@
 {
   "name": "auto-handoff",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Hands a Claude Code session off to a fresh one before the context fills: a Haiku-written brief, /clear, and a seed that points the new session at the brief.",
   "author": {
     "name": "Alex Hillman",

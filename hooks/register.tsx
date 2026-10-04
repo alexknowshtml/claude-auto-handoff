@@ -281,7 +281,8 @@ async function tryHandoff($: EngineInterface, sessionId: string, tokens: number,
     if (pausedSession !== sessionId) {
       pausedSession = sessionId
       await log($, `loop guard session=${sessionId}: ${unattended} handoffs with no user prompt; paused until one`)
-      showPanel($, { header: { mark: 'warn', text: `auto-handoff paused after ${unattended} handoffs in a row` }, steps: [{ mark: 'warn', text: 'send a message to resume' }], sticky: true })
+      showPanel($, { header: { mark: 'warn', text: `auto-handoff paused after ${unattended} handoffs in a row` }, steps: [{ mark: 'warn', text: 'send a message to resume' }], sticky: true },
+        `paused after ${unattended} handoffs in a row: send a message to resume`)
     }
     return false
   }
@@ -290,7 +291,8 @@ async function tryHandoff($: EngineInterface, sessionId: string, tokens: number,
   inFlight = true
   await $.store.set(`fired:${sessionId}`, 'briefing')
   await log($, `threshold session=${sessionId} tokens=${tokens} threshold=${threshold} via=${via}`)
-  showPanel($, { header: { mark: 'spin', text: `auto-handoff · ${k(tokens)} / ${k(threshold)}` }, steps: [{ mark: 'spin', text: 'writing brief' }] })
+  showPanel($, { header: { mark: 'spin', text: `auto-handoff · ${k(tokens)} / ${k(threshold)}` }, steps: [{ mark: 'spin', text: 'writing brief' }] },
+    `context ${k(tokens)} is past ${k(threshold)}: handing off`)
   // Not awaited: the brief can take a while and /clear only runs once the session is idle.
   handoff($, sessionId, tokens).finally(() => { inFlight = false })
   return true
@@ -323,7 +325,20 @@ let frame = 0
 let spin: Timer | undefined
 let collapse: Timer | undefined
 
-function showPanel($: EngineInterface, p: Panel) {
+// The band above the prompt is drawn on the terminal and desktop only. On the mobile app or in
+// VS Code nothing shows it, so the moments that matter go out as a toast there too: the
+// threshold tripping, the result, and anything that stays up until dismissed. Never per step.
+const BAND_SURFACES = new Set(['terminal', 'desktop'])
+async function toastOffBand($: EngineInterface, text: string) {
+  try {
+    if ((await $.session.surfaces()).some((s) => !BAND_SURFACES.has(s))) $.ui.toast(text, { timeoutMs: 30_000 })
+  } catch (err) {
+    await log($, `surfaces error ${String(err)}`)
+  }
+}
+
+function showPanel($: EngineInterface, p: Panel, toast?: string) {
+  if (toast) void toastOffBand($, toast)
   shown = p
   collapse?.cancel()
   collapse = undefined
@@ -356,7 +371,7 @@ function steps($: EngineInterface, lines: Line[]) {
 // Adds a step to the panel on screen, or opens one under `header` when nothing is showing.
 function addStep($: EngineInterface, step: Line, header: Line, sticky = false) {
   const p = shown ?? { header, steps: [] }
-  showPanel($, { ...p, steps: [...p.steps, step], sticky: p.sticky || sticky })
+  showPanel($, { ...p, steps: [...p.steps, step], sticky: p.sticky || sticky }, step.mark === 'spin' || step.mark === 'done' ? undefined : step.text)
 }
 
 // A facts-only brief is the one quiet failure: the handoff works, but the brief is thin.
@@ -365,7 +380,8 @@ const briefStep = (problem?: string): Line => problem
   : { mark: 'done', text: 'brief written' }
 
 function failed($: EngineInterface, what: string, next: string) {
-  showPanel($, { header: { mark: 'fail', text: `handoff failed: ${what}` }, steps: [{ mark: 'fail', text: next }, { mark: 'fail', text: `log: ${LOG}` }], sticky: true })
+  showPanel($, { header: { mark: 'fail', text: `handoff failed: ${what}` }, steps: [{ mark: 'fail', text: next }, { mark: 'fail', text: `log: ${LOG}` }], sticky: true },
+    `handoff failed: ${what}. ${next}`)
 }
 
 // The fresh session's first measurement: the panel's last step, which says the handoff worked.
@@ -373,7 +389,8 @@ function failed($: EngineInterface, what: string, next: string) {
 function showHandedOff($: EngineInterface, fresh: number) {
   if (!handedFrom) return
   const { tokens, link, problem } = handedFrom
-  showPanel($, { header: { mark: 'done', text: `handed off · ${k(tokens)} → ${k(fresh)}` }, steps: problem ? [briefStep(problem)] : [], link: link || undefined, sticky: !!problem })
+  showPanel($, { header: { mark: 'done', text: `handed off · ${k(tokens)} → ${k(fresh)}` }, steps: problem ? [briefStep(problem)] : [], link: link || undefined, sticky: !!problem },
+    `↪ handed off · ${k(tokens)} → ${k(fresh)}${problem ? ' · the brief is facts only' : ''}`)
   handedFrom = undefined
 }
 

@@ -50,12 +50,13 @@ const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, c
 declare const setTimeout: (fn: (...args: never[]) => void, ms: number) => unknown
 
 // The engine beneath the plugin: everything the mod calls, answered from memory.
-function engine(on: On, opts: { tokens: number; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean }): Calls {
+function engine(on: On, opts: { tokens: number; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[] }): Calls {
   const calls: Calls = { compacts: 0, steps: 0, cleared: 0, seeded: [], written: {}, completes: 0, tokens: opts.tokens, prompts: [], toasts: [], ran: 0 }
   let sessionId = 'old-session'
   let clears = 0
   mock.env(on, { HOME: '/home/test', ...(opts.env ?? {}) })
   clock = mock.clock(on) // the panel's spinner and collapse timers
+  on('session.surfaces', async () => ({ value: opts.surfaces ?? ['terminal'] }))
   on('ui.render', { component: 'AbovePrompt' }, async ($, e) => { // the engine draws nothing in the band
     const { Box } = $.ui.resolve(e)
     return <Box />
@@ -645,6 +646,20 @@ describe('auto-handoff', () => {
     await clock.advance(10_000)
     expect(await band($)).toBe('')
     expect(calls.toasts).toEqual([])
+  })
+
+  test('on the mobile app, which draws no band, the key moments go out as toasts', async ($, on) => {
+    const calls = engine(on, { tokens: 165_000, stepUsage: true, surfaces: ['terminal', 'mobile'] })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    await settle(() => calls.toasts.length > 0)
+    expect(calls.toasts).toEqual(['context 165k is past 160k: handing off'])
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    calls.tokens = 47_000
+    await step($, 0)
+    await settle(() => calls.toasts.length > 1)
+    expect(calls.toasts).toEqual(['context 165k is past 160k: handing off', '↪ handed off · 165k → 47k'])
   })
 
   test('a facts-only brief stays on the panel until dismissed', async ($, on) => {
