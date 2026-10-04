@@ -1,11 +1,17 @@
 // The static server for the viewer pages, run as `node -e SERVER_JS <dir> <host> <port>`. It
-// serves only <name>.html files from <dir>. register.tsx starts it (the loader keeps $ in that file).
+// serves only <name>.html files from <dir>, and /<first 8 characters of a session id> as that
+// session's page, so the link fits one line on a phone. register.tsx starts it (the loader keeps $ in that file).
 
 export const SERVER_JS = `
 const http = require('http'), fs = require('fs'), path = require('path')
 const [dir, host, port] = process.argv.slice(1)
 http.createServer((req, res) => {
-  const name = decodeURIComponent(new URL(req.url, 'http://x').pathname.slice(1))
+  let name = decodeURIComponent(new URL(req.url, 'http://x').pathname.slice(1))
+  if (req.method === 'GET' && /^[0-9a-f]{8}$/.test(name)) {
+    let files = []
+    try { files = fs.readdirSync(dir) } catch {}
+    name = files.filter(f => f.startsWith(name + '-') && f.endsWith('.html')).sort()[0] || ''
+  }
   if (req.method !== 'GET' || !/^[\\w-]+\\.html$/.test(name)) { res.writeHead(404); return res.end('Not found') }
   fs.readFile(path.join(dir, name), (err, data) => {
     if (err) { res.writeHead(404); return res.end('Not found') }

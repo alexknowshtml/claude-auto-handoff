@@ -39,8 +39,8 @@ Test it.`
     expect(b2).toBe(body)
   })
 
-  test('viewerLink is the served page, or the local file with no server', () => {
-    expect(viewerLink({ host: '100.64.0.1', port: '3846' }, '/pages', 'abc12345')).toBe('http://100.64.0.1:3846/abc12345.html')
+  test('viewerLink is the short served link, or the local file with no server', () => {
+    expect(viewerLink({ host: '100.64.0.1', port: '3846' }, '/pages', 'abc12345')).toBe('http://100.64.0.1:3846/abc12345')
     expect(viewerLink(undefined, '/pages', 'abc12345')).toBe('file:///pages/abc12345.html')
   })
 

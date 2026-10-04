@@ -480,7 +480,8 @@ export const register: Register = (on, options) => {
       // The old brief learns where it went, and its chain's pages link forward.
       try {
         const old = parseBrief(await $.fs.read(p.briefPath) as string)
-        await $.fs.write(p.briefPath, withHeader({ ...old.header, to: newSession }, old.body))
+        // viewer: the page link, read by the status line script for the session it handed off to.
+        await $.fs.write(p.briefPath, withHeader({ ...old.header, to: newSession, ...(p.link ? { viewer: p.link } : {}) }, old.body))
         const briefDir = p.briefPath.replace(/\/[^/]+$/, '')
         await viewer($, briefDir, `${briefDir}/pages`, p.oldSession)
       } catch (err) {

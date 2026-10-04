@@ -45,9 +45,10 @@ export function chainOf(entries: readonly Entry[], id: string): Entry[] {
   return entries.filter(e => find(e.id) === root).sort((a, b) => (a.header.at ?? '').localeCompare(b.header.at ?? ''))
 }
 
-/** The page's address: served when the mod runs a server, else the local file. */
+/** The page's address: served when the mod runs a server, else the local file. The served link
+ * uses the session id's first 8 characters, short enough to stay on one line on a phone. */
 export function viewerLink(serve: { host: string; port: string } | undefined, pagesDir: string, sessionId: string): string {
-  return serve ? `http://${serve.host}:${serve.port}/${sessionId}.html` : `file://${pagesDir}/${sessionId}.html`
+  return serve ? `http://${serve.host}:${serve.port}/${sessionId.slice(0, 8)}` : `file://${pagesDir}/${sessionId}.html`
 }
 
 // Sections meant for the fresh session, not for a person reading the page.
