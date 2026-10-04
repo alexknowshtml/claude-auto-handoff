@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 import type { On, SessionMessage } from 'claude-code'
-import { extractFacts, hasUnansweredLastRequest, isValidBrief } from '../hooks/brief.ts'
+import { briefPrompt, extractFacts, factsBlock, hasUnansweredLastRequest, isValidBrief } from '../hooks/brief.ts'
 import { renderTemplate } from '../hooks/templates.ts'
 import { parseBrief } from '../hooks/viewer.ts'
 
@@ -821,5 +821,23 @@ describe('extractFacts', () => {
     const template = '## Work in Progress\nWhat was happening.\n\n## Next Step\nThe next action.'
     expect(isValidBrief('## Next Step\nGo.', template)).toBe(true)
     expect(isValidBrief('Sure! Here is a summary.', template)).toBe(false)
+  })
+})
+
+describe('handoff numbers', () => {
+  const base = { filesModified: [], commits: [], issues: [] }
+
+  test('the prompt carries the real token figures and where the threshold came from', () => {
+    const p = briefPrompt([], { ...base, handoffTokens: 93_105, threshold: 85_000, thresholdSource: 'AUTO_HANDOFF_TOKENS', seededSessionStartSize: 45_000, unattendedCount: 2 }, 'TEMPLATE')
+    expect(p).toContain('## Handoff Numbers')
+    expect(p).toContain('**Tokens at handoff:** 93105 (93k)')
+    expect(p).toContain('**Threshold:** 85000 (85k), from AUTO_HANDOFF_TOKENS')
+    expect(p).toContain('starting size (seeded from a handoff):** 45000 (45k)')
+    expect(p).toContain('no user message:** 2')
+    expect(p.indexOf('## Handoff Numbers')).toBeLessThan(p.indexOf('TEMPLATE'))
+  })
+
+  test('no numbers, no section', () => {
+    expect(factsBlock(base)).not.toContain('Handoff Numbers')
   })
 })

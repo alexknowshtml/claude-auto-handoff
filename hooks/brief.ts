@@ -23,8 +23,11 @@ export type Facts = {
   lastUserMessage?: string
   handoffTokens?: number
   threshold?: number
+  /** Where the base threshold came from: the env override or the /config setting. */
+  thresholdSource?: string
   seededSessionStartSize?: number
-  handoffCount?: number
+  /** Handoffs since the user last typed, this one included. */
+  unattendedCount?: number
 }
 
 /** The user's own words, or undefined for a harness signal or a tool-result-only message. */
@@ -85,13 +88,14 @@ function list(items: string[], empty: string): string {
   return items.length ? items.map(i => `- ${i}`).join('\n') : empty
 }
 
+// The only token figures the brief may use. Haiku once wrote "burned its 200k budget" for a
+// session at 93k because the prompt held no numbers at all.
 function handoffNumbersBlock(f: Facts): string {
-  if (!f.handoffTokens && !f.threshold) return ''
   const lines = []
   if (f.handoffTokens !== undefined) lines.push(`- **Tokens at handoff:** ${f.handoffTokens} (${k(f.handoffTokens)})`)
-  if (f.threshold !== undefined) lines.push(`- **Threshold:** ${f.threshold} (${k(f.threshold)})`)
-  if (f.seededSessionStartSize !== undefined) lines.push(`- **Seeded session starting size:** ${f.seededSessionStartSize} (${k(f.seededSessionStartSize)})`)
-  if (f.handoffCount !== undefined) lines.push(`- **Handoff count in chain:** ${f.handoffCount}`)
+  if (f.threshold !== undefined) lines.push(`- **Threshold:** ${f.threshold} (${k(f.threshold)})${f.thresholdSource ? `, from ${f.thresholdSource}` : ''}`)
+  if (f.seededSessionStartSize !== undefined) lines.push(`- **This session's starting size (seeded from a handoff):** ${f.seededSessionStartSize} (${k(f.seededSessionStartSize)})`)
+  if (f.unattendedCount !== undefined) lines.push(`- **Handoffs in a row with no user message:** ${f.unattendedCount}`)
   return lines.length ? `## Handoff Numbers\n${lines.join('\n')}\n` : ''
 }
 
