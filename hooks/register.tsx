@@ -102,39 +102,30 @@ async function serveAddress($: EngineInterface): Promise<{ host: string; port: s
   }
 }
 
-let serving = false
-// The address this module's server listens on. Links use it, so a session that started on
-// localhost keeps handing out working links after Tailscale comes up.
-let servedAt: { host: string; port: string } | undefined
 let lastServeTry = 0
-// Starts the server unless this module already runs one. The spawn loop is the child's life: it
-// runs on after the caller returns and ends with the child or the module. A second session finds
-// the port taken, its child exits, and the first session's server keeps serving the same folder.
-function ensureServer($: EngineInterface, pagesDir: string, addr: { host: string; port: string }) {
-  if (serving) return
-  serving = true
-  servedAt = addr
-  void (async () => {
-    try {
-      for await (const { text } of $.process.spawn({ argv: ['node', '-e', SERVER_JS, pagesDir, addr.host, addr.port] })) await log($, text.trim())
-    } catch (err) {
-      await log($, `viewer server failed ${String(err)}`)
-    } finally {
-      serving = false
-      servedAt = undefined
-    }
-  })()
+// Starts the server detached (setsid, else nohup), so the pages stay served after this session
+// exits: a brief's link is opened later, often from a phone, long after the handoff. When a
+// server already holds the port, the new child exits at once, so a launch is safe to repeat.
+// Its output goes to the mod's log.
+async function launchServer($: EngineInterface, pagesDir: string, addr: { host: string; port: string }) {
+  try {
+    const home = await $.env.get('HOME')
+    await $.process.run(['sh', '-c', 'mkdir -p "$1"; if command -v setsid >/dev/null 2>&1; then d=setsid; else d=nohup; fi; $d node -e "$2" "$1" "$3" "$4" >>"$5" 2>&1 </dev/null &',
+      'sh', pagesDir, SERVER_JS, addr.host, addr.port, `${home}/${BRIEF_DIR}/auto-handoff.log`])
+  } catch (err) {
+    await log($, `viewer server failed ${String(err)}`)
+  }
 }
 
-// Keeps a server up for the session's life. Called on startup and after each turn, so a session
-// whose mod was reloaded, or whose server exited, serves again. At most one try a minute: when
-// another session holds the port, the child here exits at once.
+// Brings the server back if it died (a reboot, a crash). Called on startup and after each turn,
+// at most once in five minutes. Sessions with the kill switches set serve too: the switches stop
+// handoffs, and serving old briefs is not one.
 async function keepServing($: EngineInterface) {
-  if (serving || Date.now() - lastServeTry < 60_000 || await $.env.get('AUTO_HANDOFF_DISABLE')) return
+  if (Date.now() - lastServeTry < 300_000) return
   lastServeTry = Date.now()
   const addr = await serveAddress($)
   const home = await $.env.get('HOME')
-  if (addr && home) ensureServer($, `${home}/${BRIEF_DIR}/pages`, addr)
+  if (addr && home) await launchServer($, `${home}/${BRIEF_DIR}/pages`, addr)
 }
 
 /** Writes the page of every brief in sessionId's chain, so each page lists the whole chain. */
@@ -163,8 +154,8 @@ async function viewer($: EngineInterface, briefDir: string, pagesDir: string, se
     await $.process.run(['mkdir', '-p', pagesDir])
     await writeChainPages($, briefDir, pagesDir, sessionId)
     const addr = await serveAddress($)
-    if (addr) ensureServer($, pagesDir, addr)
-    return viewerLink(servedAt ?? addr, pagesDir, sessionId)
+    if (addr) await launchServer($, pagesDir, addr)
+    return viewerLink(addr, pagesDir, sessionId)
   } catch (err) {
     await log($, `viewer error session=${sessionId} ${String(err)}`)
     return ''
