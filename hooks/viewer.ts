@@ -3,10 +3,10 @@
 // share a chain id or a from/to link are one run of handoffs, and every page in a run lists all of them.
 // The page renders the brief's markdown in the browser from a CDN, so the mod ships no packages.
 
-export type Header = { from?: string; to?: string; chain?: string; tokens?: string; at?: string; cwd?: string; viewer?: string }
+export type Header = { from?: string; to?: string; chain?: string; depth?: string; tokens?: string; at?: string; cwd?: string; viewer?: string }
 export type Entry = { id: string; header: Header; body: string }
 
-const HEADER_KEYS = ['from', 'to', 'chain', 'tokens', 'at', 'cwd', 'viewer'] as const
+const HEADER_KEYS = ['from', 'to', 'chain', 'depth', 'tokens', 'at', 'cwd', 'viewer'] as const
 
 /** Splits a brief into its header and body. A brief with no header is a chain of one. */
 export function parseBrief(text: string): { header: Header; body: string } {

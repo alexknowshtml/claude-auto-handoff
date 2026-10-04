@@ -28,6 +28,8 @@ export type Facts = {
   seededSessionStartSize?: number
   /** Handoffs since the user last typed, this one included. */
   unattendedCount?: number
+  /** Which handoff this is in its chain (1 for the first, 2 for the second, etc.). */
+  depth?: number
 }
 
 /** The user's own words, or undefined for a harness signal or a tool-result-only message. */
@@ -92,6 +94,7 @@ function list(items: string[], empty: string): string {
 // session at 93k because the prompt held no numbers at all.
 function handoffNumbersBlock(f: Facts): string {
   const lines = []
+  if (f.depth !== undefined) lines.push(`- **Handoff depth:** ${f.depth}`)
   if (f.handoffTokens !== undefined) lines.push(`- **Tokens at handoff:** ${f.handoffTokens} (${k(f.handoffTokens)})`)
   if (f.threshold !== undefined) lines.push(`- **Threshold:** ${f.threshold} (${k(f.threshold)})${f.thresholdSource ? `, from ${f.thresholdSource}` : ''}`)
   if (f.seededSessionStartSize !== undefined) lines.push(`- **This session's starting size (seeded from a handoff):** ${f.seededSessionStartSize} (${k(f.seededSessionStartSize)})`)

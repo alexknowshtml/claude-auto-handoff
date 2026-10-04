@@ -72,7 +72,7 @@ let handedFrom: { session: string; tokens: number; link: string; problem?: strin
 // The seeded session's place in its chain of handoffs, for its own brief's header. Also kept in
 // the store as lineage:<session>, because a hot reload resets module variables: a session seeded
 // before a reload would otherwise start a new chain when it hands off.
-type Lineage = { from: string; chain: string }
+type Lineage = { from: string; chain: string; depth?: number }
 let lineage: Lineage | undefined
 // Tokens added since the last response measured the context: tool results and the
 // response's own output. turn.complete alone missed a turn whose reads jumped from 63k
@@ -209,7 +209,7 @@ async function viewer($: EngineInterface, briefDir: string, pagesDir: string, se
 async function storedLineage($: EngineInterface, sessionId: string): Promise<Lineage | undefined> {
   try {
     const v = await $.store.get(`lineage:${sessionId}`) as Partial<Lineage> | undefined
-    return typeof v?.from === 'string' && typeof v.chain === 'string' ? { from: v.from, chain: v.chain } : undefined
+    return typeof v?.from === 'string' && typeof v.chain === 'string' ? { from: v.from, chain: v.chain, depth: typeof v.depth === 'number' ? v.depth : undefined } : undefined
   } catch {
     return undefined
   }
@@ -217,6 +217,7 @@ async function storedLineage($: EngineInterface, sessionId: string): Promise<Lin
 
 async function handoff($: EngineInterface, sessionId: string, tokens: number, threshold: number) {
   try {
+    const own = sessionId === seededSession && lineage ? lineage : await storedLineage($, sessionId)
     const messages = await $.session.messages()
     const facts = extractFacts(messages, cfg.ignoreFiles)
     const { base, source } = await configured($)
@@ -225,6 +226,9 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     facts.thresholdSource = threshold > base ? `${source} (${k(base)}), raised to leave ${k(MIN_HEADROOM)} above the starting size` : source
     if (sessionId === seededSession && floor !== undefined) facts.seededSessionStartSize = floor
     facts.unattendedCount = unattended
+    // A session with no lineage starts its chain. One seeded before depth existed stays unknown.
+    const depth = own ? own.depth : 1
+    if (depth !== undefined) facts.depth = depth
     const briefTemplate = await template($, 'briefTemplate')
     const result = await $.model.complete({
       model: 'haiku',
@@ -250,9 +254,8 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     const briefDir = `${home}/${BRIEF_DIR}`
     const briefPath = `${briefDir}/${sessionId}.md`
     const pagesDir = `${briefDir}/pages`
-    const own = sessionId === seededSession && lineage ? lineage : await storedLineage($, sessionId)
     const chain = own?.chain ?? sessionId
-    const header = { from: own?.from, chain, tokens: String(tokens), at: new Date().toISOString(), cwd }
+    const header = { from: own?.from, chain, depth: depth !== undefined ? String(depth) : undefined, tokens: String(tokens), at: new Date().toISOString(), cwd }
     await $.fs.write(briefPath, withHeader(header, brief))
     const link = await viewer($, briefDir, pagesDir, sessionId)
     pending = { oldSession: sessionId, briefPath, tokens, chain, link, problem }
@@ -618,7 +621,9 @@ export const register: Register = (on, options) => {
       await log($, `seeding new=${newSession} from=${p.oldSession}`)
       handedFrom = { session: p.oldSession, tokens: p.tokens, link: p.link, problem: p.problem }
       steps($, [briefStep(p.problem), { mark: 'done', text: 'cleared' }, { mark: 'spin', text: 'starting the fresh session' }])
-      lineage = { from: p.oldSession, chain: p.chain }
+      const own = await storedLineage($, p.oldSession)
+      const prior = own ? own.depth : 1
+      lineage = { from: p.oldSession, chain: p.chain, depth: prior !== undefined ? prior + 1 : undefined }
       await $.store.set(`lineage:${newSession}`, lineage)
       // The old brief learns where it went, and its chain's pages link forward.
       try {
