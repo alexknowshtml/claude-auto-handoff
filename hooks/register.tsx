@@ -1,8 +1,10 @@
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 import { assembleBrief, briefPrompt, extractFacts, isValidBrief } from './brief.ts'
 import { chainOf, parseBrief, renderPage, viewerLink, withHeader } from './viewer.ts'
 import type { Entry } from './viewer.ts'
 import { SERVER_JS, parseAddress } from './server.ts'
+import { isSpinning, panelTree } from './panel.tsx'
+import type { Line, Panel } from './panel.tsx'
 
 // At the token threshold, Haiku writes a handoff brief, the mod runs /clear, then seeds the
 // fresh session with a pointer to the brief. Interactive terminal sessions only: where a
@@ -38,12 +40,12 @@ let cfg: Config = DEFAULTS
 const USER_ORIGINS = new Set(['composer', 'bridge'])
 // Rough chars-per-token for tool output, used to project the next request's size.
 const CHARS_PER_TOKEN = 4
-// Toasts are the whole UI: one when the threshold trips, one once the fresh session is
-// measured. The host shows them under the plugin's name, so the text carries no prefix.
-// No band or status entry: the host draws a status entry as "⚠ auto-handoff:", which reads as an error.
-const TOAST_MS = 30_000
+// The panel above the prompt (panel.tsx) is the whole UI. No status entry: the host draws one
+// as "⚠ auto-handoff:", which reads as an error.
+const LOG = `~/${BRIEF_DIR}/auto-handoff.log`
 
-type Pending = { oldSession: string; briefPath: string; tokens: number; chain: string; link: string }
+// problem: why the brief is facts only, when Haiku's summary was unusable.
+type Pending = { oldSession: string; briefPath: string; tokens: number; chain: string; link: string; problem?: string }
 
 // The seed prompt's first characters; the render hook knows the seed row by them.
 const SEED_PREFIX = '[auto-handoff] ↪ Handoff from session'
@@ -65,8 +67,8 @@ let seededSession: string | undefined
 let floor: number | undefined
 let unattended = 0 // handoffs since the user last typed a prompt
 let pausedSession: string | undefined
-// The handoff the fresh session came from, until its first request is measured and toasted.
-let handedFrom: { session: string; tokens: number; link: string } | undefined
+// The handoff the fresh session came from, until its first request is measured and shown on the panel.
+let handedFrom: { session: string; tokens: number; link: string; problem?: string } | undefined
 // The seeded session's place in its chain of handoffs, for its own brief's header. Also kept in
 // the store as lineage:<session>, because a hot reload resets module variables: a session seeded
 // before a reload would otherwise start a new chain when it hands off.
@@ -240,17 +242,20 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number) {
     const header = { from: own?.from, chain, tokens: String(tokens), at: new Date().toISOString(), cwd }
     await $.fs.write(briefPath, withHeader(header, brief))
     const link = await viewer($, briefDir, pagesDir, sessionId)
-    pending = { oldSession: sessionId, briefPath, tokens, chain, link }
+    pending = { oldSession: sessionId, briefPath, tokens, chain, link, problem }
+    steps($, [briefStep(problem), { mark: 'spin', text: 'clearing' }])
     await $.store.set(`fired:${sessionId}`, problem ? `clearing-facts-only:${problem}` : 'clearing')
     await log($, `brief written ${briefPath} (${brief.length} chars); queueing /clear`)
     $.command.run({ command: 'clear' }).catch(async (err: unknown) => {
       pending = undefined
-      $.ui.toast(`handoff failed: /clear was rejected. See ${BRIEF_DIR}/auto-handoff.log`, { timeoutMs: TOAST_MS })
+      // fired stays 'clearing', so this session does not try again; it carries on as it is.
+      failed($, '/clear was rejected', `this session keeps going; the brief is at ${briefPath}`)
       await log($, `clear rejected ${String(err)}`)
     })
   } catch (err) {
     pending = undefined
-    $.ui.toast(`handoff failed: no brief written. See ${BRIEF_DIR}/auto-handoff.log`, { timeoutMs: TOAST_MS })
+    // fired stays 'briefing', which tryHandoff treats as an orphan: the next turn tries again.
+    failed($, 'no brief written', 'this session keeps going and tries again after the next turn')
     await log($, `handoff error session=${sessionId} ${String(err)}; no clear`)
   }
 }
@@ -276,7 +281,7 @@ async function tryHandoff($: EngineInterface, sessionId: string, tokens: number,
     if (pausedSession !== sessionId) {
       pausedSession = sessionId
       await log($, `loop guard session=${sessionId}: ${unattended} handoffs with no user prompt; paused until one`)
-      $.ui.toast(`paused after ${unattended} handoffs in a row: send a message to resume`, { timeoutMs: TOAST_MS })
+      showPanel($, { header: { mark: 'warn', text: `auto-handoff paused after ${unattended} handoffs in a row` }, steps: [{ mark: 'warn', text: 'send a message to resume' }], sticky: true })
     }
     return false
   }
@@ -285,7 +290,7 @@ async function tryHandoff($: EngineInterface, sessionId: string, tokens: number,
   inFlight = true
   await $.store.set(`fired:${sessionId}`, 'briefing')
   await log($, `threshold session=${sessionId} tokens=${tokens} threshold=${threshold} via=${via}`)
-  $.ui.toast(`context ${k(tokens)} is past ${k(threshold)}: writing a brief, then /clear`, { timeoutMs: TOAST_MS })
+  showPanel($, { header: { mark: 'spin', text: `auto-handoff · ${k(tokens)} / ${k(threshold)}` }, steps: [{ mark: 'spin', text: 'writing brief' }] })
   // Not awaited: the brief can take a while and /clear only runs once the session is idle.
   handoff($, sessionId, tokens).finally(() => { inFlight = false })
   return true
@@ -309,10 +314,66 @@ async function canHandOff($: EngineInterface, sessionId: string): Promise<boolea
   return !fired || fired === 'briefing'
 }
 
-// The fresh session's first measurement: the one toast that says the handoff worked.
-function toastHandedOff($: EngineInterface, sessionId: string, fresh: number) {
+// The panel above the prompt. A module variable rather than $.state: $.state does not survive
+// /clear, and the panel carries the handoff across it.
+const FRAME_MS = 100 // the host redraws the band ten times a second at most
+const DONE_MS = 10_000
+let shown: Panel | undefined
+let frame = 0
+let spin: Timer | undefined
+let collapse: Timer | undefined
+
+function showPanel($: EngineInterface, p: Panel) {
+  shown = p
+  collapse?.cancel()
+  collapse = undefined
+  if (isSpinning(p)) {
+    spin ??= $.clock.every(FRAME_MS, () => {
+      frame++
+      $.ui.invalidate('ui.render')
+    })
+  } else {
+    spin?.cancel()
+    spin = undefined
+    if (!p.sticky) collapse = $.clock.after(DONE_MS, () => hidePanel($))
+  }
+  $.ui.invalidate('ui.render')
+}
+
+function hidePanel($: EngineInterface) {
+  shown = undefined
+  spin?.cancel()
+  collapse?.cancel()
+  spin = collapse = undefined
+  $.ui.invalidate('ui.render')
+}
+
+// The steps under the panel's current header; a panel lost to a reload gets a plain one.
+function steps($: EngineInterface, lines: Line[]) {
+  showPanel($, { header: shown?.header ?? { mark: 'spin', text: 'auto-handoff' }, steps: lines })
+}
+
+// Adds a step to the panel on screen, or opens one under `header` when nothing is showing.
+function addStep($: EngineInterface, step: Line, header: Line, sticky = false) {
+  const p = shown ?? { header, steps: [] }
+  showPanel($, { ...p, steps: [...p.steps, step], sticky: p.sticky || sticky })
+}
+
+// A facts-only brief is the one quiet failure: the handoff works, but the brief is thin.
+const briefStep = (problem?: string): Line => problem
+  ? { mark: 'warn', text: `brief is facts only: the summary failed (${problem})` }
+  : { mark: 'done', text: 'brief written' }
+
+function failed($: EngineInterface, what: string, next: string) {
+  showPanel($, { header: { mark: 'fail', text: `handoff failed: ${what}` }, steps: [{ mark: 'fail', text: next }, { mark: 'fail', text: `log: ${LOG}` }], sticky: true })
+}
+
+// The fresh session's first measurement: the panel's last step, which says the handoff worked.
+// It collapses on its own unless the brief was facts only.
+function showHandedOff($: EngineInterface, fresh: number) {
   if (!handedFrom) return
-  $.ui.toast(`↪ handed off · ${short(handedFrom.session)} → ${short(sessionId)} · ${k(handedFrom.tokens)} → ${k(fresh)}${handedFrom.link ? ` · ${handedFrom.link}` : ''}`, { timeoutMs: TOAST_MS })
+  const { tokens, link, problem } = handedFrom
+  showPanel($, { header: { mark: 'done', text: `handed off · ${k(tokens)} → ${k(fresh)}` }, steps: problem ? [briefStep(problem)] : [], link: link || undefined, sticky: !!problem })
   handedFrom = undefined
 }
 
@@ -341,7 +402,7 @@ async function warnTightThreshold($: EngineInterface, sessionId: string) {
   if (headroom >= MIN_HEADROOM) return
   await log($, `tight threshold session=${sessionId} threshold=${base} source=${source} floor=${floor} headroom=${headroom} effective=${floor + MIN_HEADROOM}`)
   const left = headroom > 0 ? `leaves ${k(headroom)}` : 'is below'
-  $.ui.toast(`threshold ${k(base)} (${source}) ${left} this session's ${k(floor)} start: handing off at ${k(floor + MIN_HEADROOM)} instead`, { timeoutMs: TOAST_MS })
+  addStep($, { mark: 'warn', text: `threshold ${k(base)} (${source}) ${left} this session's ${k(floor)} start: handing off at ${k(floor + MIN_HEADROOM)} instead` }, { mark: 'warn', text: 'auto-handoff' }, true)
 }
 
 // A non-positive or non-numeric value falls back to the default rather than handing off at 0.
@@ -375,7 +436,7 @@ export const register: Register = (on, options) => {
         // when that response carried no usage.
         floor = tokens
         await log($, `floor set at turn end session=${sessionId} tokens=${tokens} (first response carried no usage)`)
-        toastHandedOff($, sessionId, tokens)
+        showHandedOff($, tokens)
         await warnTightThreshold($, sessionId)
         return r
       }
@@ -447,7 +508,7 @@ export const register: Register = (on, options) => {
     if (seeding && r.usage) {
       floor = r.usage.input_tokens + r.usage.cache_read_input_tokens + r.usage.cache_creation_input_tokens
       await log($, `floor session=${seededSession} tokens=${floor} (seed turn's first request)`)
-      toastHandedOff($, seededSession!, floor)
+      showHandedOff($, floor)
       await warnTightThreshold($, seededSession!)
     }
     return r
@@ -476,7 +537,13 @@ export const register: Register = (on, options) => {
   // The seed row in the transcript: the brief path and the viewer URL drawn as links, so a
   // click opens them. The stored message stays as submitted; only the drawing changes. A
   // Markdown element linkifies http:, https: and file: (the Link element refuses the
-  // Tailscale IP), and the toast cannot carry links at all.
+  // Tailscale IP), and the panel draws its brief link the same way.
+  // Yields the band to a survey, and passes when there is nothing to show.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (!shown || e.props.hasSurvey) return next(e)
+    return panelTree($.ui.resolve(e), shown, frame, () => hidePanel($))
+  })
+
   on('ui.render', { component: 'UserMessage', props: { origin: { kind: 'plugin' } } }, async ($, e, next) => {
     const origin = e.props.origin
     if (origin.kind !== 'plugin' || origin.name !== $.plugin.name || !e.props.text.startsWith(SEED_PREFIX)) return next(e)
@@ -487,6 +554,7 @@ export const register: Register = (on, options) => {
   on('prompt.submit', async ($, e, next) => {
     if (e.origin && USER_ORIGINS.has(e.origin.kind)) {
       unattended = 0
+      if (pausedSession) hidePanel($) // the pause panel's "send a message to resume" is done
       pausedSession = undefined
     }
     return next(e)
@@ -509,7 +577,8 @@ export const register: Register = (on, options) => {
       unmeasured = 0
       await $.store.set(`fired:${p.oldSession}`, `seeded:${newSession}`)
       await log($, `seeding new=${newSession} from=${p.oldSession}`)
-      handedFrom = { session: p.oldSession, tokens: p.tokens, link: p.link }
+      handedFrom = { session: p.oldSession, tokens: p.tokens, link: p.link, problem: p.problem }
+      steps($, [briefStep(p.problem), { mark: 'done', text: 'cleared' }, { mark: 'spin', text: 'starting the fresh session' }])
       lineage = { from: p.oldSession, chain: p.chain }
       await $.store.set(`lineage:${newSession}`, lineage)
       // The old brief learns where it went, and its chain's pages link forward.
@@ -525,7 +594,11 @@ export const register: Register = (on, options) => {
       // One line on screen; the model reads the brief from disk. A full brief as the
       // seed showed up as a wall of text the person never wrote.
       const text = `${SEED_PREFIX} ${short(p.oldSession)}. The previous session hit its context limit and was cleared. Read the brief at ${p.briefPath} before doing anything else${p.link ? ` (readable copy: ${p.link})` : ''} and follow its Instructions section. Open your first reply with the line "↪ Handoff from session ${short(p.oldSession)}".`
-      $.prompt.submit({ text }).catch((err: unknown) => log($, `seed rejected ${String(err)}`))
+      $.prompt.submit({ text }).catch((err: unknown) => {
+        handedFrom = undefined
+        failed($, 'the seed prompt was rejected', `paste the brief path to carry on: ${p.briefPath}`)
+        return log($, `seed rejected ${String(err)}`)
+      })
     } catch (err) {
       await log($, `seed error ${String(err)}`)
     }

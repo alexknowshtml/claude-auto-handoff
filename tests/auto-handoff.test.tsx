@@ -55,6 +55,11 @@ function engine(on: On, opts: { tokens: number; files?: Record<string, string>; 
   let sessionId = 'old-session'
   let clears = 0
   mock.env(on, { HOME: '/home/test', ...(opts.env ?? {}) })
+  clock = mock.clock(on) // the panel's spinner and collapse timers
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e) => { // the engine draws nothing in the band
+    const { Box } = $.ui.resolve(e)
+    return <Box />
+  })
   mock.store(on, opts.store) // the test's $ has no store noun: what the mod finds in its store is seeded here
   on('turn.complete', async () => ({ text: 'ok' }))
   on('session.usage', async () => ({ value: { startedAt: 0, context: { tokens: calls.tokens, window: 200_000 }, rateLimits: [] } }))
@@ -127,6 +132,27 @@ async function step($: TestBody extends (...a: infer A) => unknown ? A[0] : neve
   const chunks: { kind: string; text?: string }[] = []
   for await (const c of $.turn.step({ ...STEP, index })) chunks.push(c)
   return chunks
+}
+
+let clock: ReturnType<typeof mock.clock>
+
+const mountBand = ($: Parameters<TestBody>[0]) =>
+  $.ui.mount({ plugin: 'auto-handoff', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 20, bodyColumns: 120 } as never })
+
+// Every string in a drawn tree, in order: Text children, a Markdown's text, a Button's label.
+const textOf = (n: unknown): string => typeof n === 'string' ? n
+  : Array.isArray(n) ? n.map(textOf).join('')
+  : n && typeof n === 'object' ? Object.entries(n).map(([k, v]) => k === 'children' || k === 'text' || k === 'label' || k === 'props' ? textOf(v) : '').join('')
+  : ''
+
+// The band above the prompt as drawn, flattened to its text; '' when the mod draws nothing.
+async function band($: Parameters<TestBody>[0]): Promise<string> {
+  const ui = await mountBand($)
+  try {
+    return textOf(await ui.drawn())
+  } finally {
+    await ui.unmount()
+  }
 }
 
 async function settle(check: () => boolean) {
@@ -449,7 +475,7 @@ describe('auto-handoff', () => {
     expect(calls.cleared).toBe(2) // the ignored options did not hold it off
   })
 
-  test('a threshold too close to the floor is raised, and a toast names the env var', async ($, on) => {
+  test('a threshold too close to the floor is raised, and the panel names the env var', async ($, on) => {
     // The 2026-10-04 live run: AUTO_HANDOFF_TOKENS=80000 left in a shell, seeded sessions start at
     // ~45k. max(80k, 45k + 20k) was 80k, so each seeded session handed off after ~35k of work: eight times.
     const calls = engine(on, { tokens: 85_000, env: { AUTO_HANDOFF_TOKENS: '80000' } })
@@ -459,20 +485,20 @@ describe('auto-handoff', () => {
     await settle(() => calls.seeded.length > 0)
     calls.tokens = 45_000
     await $.turn.complete(TURN) // seed turn sets the floor: 35k of headroom, under the 40k minimum
-    const warning = calls.toasts.find(t => t.startsWith('threshold'))
-    expect(warning).toBe("threshold 80k (AUTO_HANDOFF_TOKENS) leaves 35k this session's 45k start: handing off at 85k instead")
+    const warning = "threshold 80k (AUTO_HANDOFF_TOKENS) leaves 35k this session's 45k start: handing off at 85k instead"
+    expect(await band($)).toContain(`⚠ ${warning}`)
     calls.tokens = 81_000 // past 80k; the old math handed off here
     await $.turn.complete(TURN)
     await settle(() => false)
     expect(calls.cleared).toBe(1)
-    expect(calls.toasts.filter(t => t.startsWith('threshold')).length).toBe(1) // warned once, not every turn
+    expect((await band($)).split(warning).length - 1).toBe(1) // warned once, not every turn
     calls.tokens = 86_000 // floor + 40k
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 1)
     expect(calls.cleared).toBe(2)
   })
 
-  test('the headroom toast names /config when the threshold field is the source', { options: { threshold: 60_000 } }, async ($, on) => {
+  test('the headroom warning names /config when the threshold field is the source', { options: { threshold: 60_000 } }, async ($, on) => {
     const calls = engine(on, { tokens: 65_000 })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
@@ -480,10 +506,10 @@ describe('auto-handoff', () => {
     await settle(() => calls.seeded.length > 0)
     calls.tokens = 45_000
     await $.turn.complete(TURN)
-    expect(calls.toasts.some(t => t.includes('(threshold in /config)'))).toBe(true)
+    expect(await band($)).toContain('(threshold in /config)')
   })
 
-  test('no headroom toast at the default threshold', async ($, on) => {
+  test('no headroom warning at the default threshold', async ($, on) => {
     const calls = engine(on, { tokens: 165_000 })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
@@ -491,7 +517,7 @@ describe('auto-handoff', () => {
     await settle(() => calls.seeded.length > 0)
     calls.tokens = 45_000
     await $.turn.complete(TURN)
-    expect(calls.toasts.some(t => t.startsWith('threshold'))).toBe(false)
+    expect(await band($)).not.toContain('threshold')
   })
 
   test('progress guard: a typed prompt resumes handoffs', async ($, on) => {
@@ -593,22 +619,49 @@ describe('auto-handoff', () => {
     expect(calls.completes).toBe(0)
   })
 
-  test('the only UI is two toasts: the threshold, then the measured handoff', async ($, on) => {
+  test('the panel above the prompt walks the handoff, then collapses', async ($, on) => {
     const calls = engine(on, { tokens: 165_000, stepUsage: true })
+    expect(await band($)).toBe('')
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
-    expect(calls.toasts).toEqual(['context 165k is past 160k: writing a brief, then /clear'])
+    const clearing = await band($)
+    expect(clearing).toContain('auto-handoff · 165k / 160k')
+    expect(clearing).toContain('✓ brief written')
+    expect(clearing).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] clearing/)
+    await clock.advance(100)
+    expect(await band($)).not.toBe(clearing) // the spinner moved
 
     await $.classic.SessionStart({ source: 'clear' })
     await settle(() => calls.seeded.length > 0)
-    expect(calls.seeded[0]).toContain('Open your first reply with the line "↪ Handoff from session old-sess"')
-    expect(calls.toasts.length).toBe(1) // the handoff toast waits for the fresh session's size
+    expect(await band($)).toContain('✓ cleared')
+    expect(await band($)).toContain('starting the fresh session')
 
     calls.tokens = 47_000
     await step($, 0) // the seed turn's first request
-    expect(calls.toasts[1]).toBe('↪ handed off · old-sess → new-sess · 165k → 47k · http://127.0.0.1:3846/old-sess')
-    await step($, 1)
-    expect(calls.toasts.length).toBe(2)
+    const done = await band($)
+    expect(done).toContain('✓ handed off · 165k → 47k')
+    expect(done).toContain('[open brief](http://127.0.0.1:3846/old-sess)')
+    expect(done).not.toContain('Dismiss')
+    await clock.advance(10_000)
+    expect(await band($)).toBe('')
+    expect(calls.toasts).toEqual([])
+  })
+
+  test('a facts-only brief stays on the panel until dismissed', async ($, on) => {
+    const calls = engine(on, { tokens: 165_000, stepUsage: true, brief: null })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    expect(await band($)).toContain('⚠ brief is facts only: the summary failed (empty-reply)')
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    calls.tokens = 47_000
+    await step($, 0)
+    await clock.advance(10_000)
+    const ui = await mountBand($)
+    expect(textOf(await ui.drawn())).toContain('⚠ brief is facts only')
+    await ui.press({ key: 'dismiss' })
+    expect(textOf(await ui.drawn())).toBe('')
+    await ui.unmount()
   })
 
   test('past the threshold, tool calls are refused before they run', async ($, on) => {

@@ -13,7 +13,7 @@ Auto-compact summarizes in place, and you can't control what it keeps. A handoff
 1. **Threshold.** The mod checks the context size after each turn and before each model request, including tool output that hasn't been measured yet. Once it's past the threshold, the mod refuses new tool calls, so one burst of reads can't overflow the window.
 2. **Brief.** Haiku writes the brief from the transcript. If Haiku fails, a facts-only brief stands in. Briefs go to `~/.claude/state/auto-handoff/<session-id>.md`.
 3. **Clear and seed.** The mod runs `/clear` and sends the fresh session one line: read the brief and follow its Instructions section. In the transcript, that line's brief path and viewer URL are drawn as links. Claude Code makes them clickable only when it detects a terminal that supports links. Over plain SSH it usually doesn't, so set `FORCE_HYPERLINK=1` if your terminal handles links, or use the status line link below.
-4. **Toasts.** You see one toast when the threshold trips and one when the new session is measured, such as `↪ handed off · 1a2b3c4d → 5e6f7a8b · 162k → 45k`, followed by the brief's viewer link.
+4. **A panel above the prompt.** It shows each step with a braille spinner on the one still running: writing the brief, clearing, starting the fresh session. Once the new session is measured it reads `✓ handed off · 162k → 45k` with an `open brief` link, then collapses after 10 seconds. Failures, the loop-guard pause, a facts-only brief and a too-tight threshold stay up until you press Dismiss. The panel steps aside while a survey holds that band.
 5. **Viewer.** Each brief also gets a readable page in `~/.claude/state/auto-handoff/pages/`. The page shows the brief and every handoff in the same run, linked in order. The served link is short, like `http://100.x.y.z:3846/1a2b3c4d`, so it fits on one line on a phone. By default the mod serves these pages on your Tailscale IP at port 3846, so you can open them from any device on your tailnet. Devices off your tailnet can't reach them. The server starts with the first session that loads the mod and runs while that session is open; if it stops, including when the mod reloads, the next session to finish a turn starts it again. Without Tailscale, the mod serves on `127.0.0.1` instead, so the link opens only on this machine. If Tailscale comes up later, a session already serving on localhost keeps using it; the next new session can serve on the Tailscale IP.
 6. **Status line link (optional).** `statusline/handoff-link.sh` wraps your status line command and adds a `↪ <link>` line when the session came from a handoff. Set it as the `statusLine` command in `~/.claude/settings.json`, with your existing command after it:
 
@@ -46,7 +46,7 @@ Every setting is a row in `/config` under auto-handoff. They're stored in `~/.cl
 
 | Setting | Default | What it does |
 |---|---|---|
-| `threshold` | `160000` | Context tokens that trigger a handoff. Sized for a 200k window: it leaves room for the brief and the turn in flight. A seeded session hands off no sooner than 40k past its own starting size, whatever this says; set it lower than that and a toast tells you where the line actually is |
+| `threshold` | `160000` | Context tokens that trigger a handoff. Sized for a 200k window: it leaves room for the brief and the turn in flight. A seeded session hands off no sooner than 40k past its own starting size, whatever this says; set it lower than that and the panel tells you where the line actually is |
 | `maxConsecutiveHandoffs` | `2` | Handoffs allowed before you type a prompt; past this, the mod pauses until you do |
 | `briefTemplate` | `~/.claude/auto-handoff/brief.md` | Your copy of the sections Haiku writes |
 | `instructionsTemplate` | `~/.claude/auto-handoff/instructions.md` | Your copy of what the fresh session is told to do |
@@ -55,7 +55,7 @@ Every setting is a row in `/config` under auto-handoff. They're stored in `~/.cl
 
 Environment variables:
 
-- `AUTO_HANDOFF_TOKENS=60000` overrides the threshold for one run, so you can watch a handoff without filling 160k first. It stays set in that shell after the test. Seeded sessions start near 45k, so a value under about 85k leaves them less than 40k of room: the mod then hands off at start + 40k instead and toasts `threshold 60k (AUTO_HANDOFF_TOKENS) leaves 15k ...` so you know the override is still live.
+- `AUTO_HANDOFF_TOKENS=60000` overrides the threshold for one run, so you can watch a handoff without filling 160k first. It stays set in that shell after the test. Seeded sessions start near 45k, so a value under about 85k leaves them less than 40k of room: the mod then hands off at start + 40k instead and the panel shows `threshold 60k (AUTO_HANDOFF_TOKENS) leaves 15k ...` so you know the override is still live.
 - `AUTO_HANDOFF_DISABLE=1` turns the mod off for one session, viewer server included.
 - `DISABLE_AUTO_COMPACT` also turns it off. When something else manages the context limit, such as a wrapper that pipes the session, `/clear` would break that pipe. The viewer server still runs there.
 
