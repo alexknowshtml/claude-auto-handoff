@@ -431,23 +431,67 @@ describe('auto-handoff', () => {
     expect(calls.cleared).toBe(1)
   })
 
-  test('growth is a quarter of the threshold, not a config field', { options: { growth: 1_000_000 } }, async ($, on) => {
-    const calls = engine(on, { tokens: 31_000, env: { AUTO_HANDOFF_TOKENS: '100000' } })
-    calls.tokens = 120_000
+  test('a seeded session gets 40k of headroom above its floor, not a config field', { options: { headroom: 1_000_000, growth: 1_000_000 } }, async ($, on) => {
+    const calls = engine(on, { tokens: 120_000, env: { AUTO_HANDOFF_TOKENS: '100000' } })
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     await $.classic.SessionStart({ source: 'clear' })
     await settle(() => calls.seeded.length > 0)
-    calls.tokens = 90_000 // floor 90k: the line moves to 115k
+    calls.tokens = 90_000 // floor 90k: the line moves to 130k
     await $.turn.complete(TURN) // seed turn sets the floor
-    calls.tokens = 110_000
+    calls.tokens = 125_000
     await $.turn.complete(TURN)
     await settle(() => false)
-    expect(calls.cleared).toBe(1) // 110k: past the 100k threshold, short of floor + 25k
-    calls.tokens = 116_000
+    expect(calls.cleared).toBe(1) // 125k: past the 100k threshold, short of floor + 40k
+    calls.tokens = 131_000
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 1)
-    expect(calls.cleared).toBe(2) // the ignored growth option did not hold it off
+    expect(calls.cleared).toBe(2) // the ignored options did not hold it off
+  })
+
+  test('a threshold too close to the floor is raised, and a toast names the env var', async ($, on) => {
+    // The 2026-10-04 live run: AUTO_HANDOFF_TOKENS=80000 left in a shell, seeded sessions start at
+    // ~45k. max(80k, 45k + 20k) was 80k, so each seeded session handed off after ~35k of work: eight times.
+    const calls = engine(on, { tokens: 85_000, env: { AUTO_HANDOFF_TOKENS: '80000' } })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    calls.tokens = 45_000
+    await $.turn.complete(TURN) // seed turn sets the floor: 35k of headroom, under the 40k minimum
+    const warning = calls.toasts.find(t => t.startsWith('threshold'))
+    expect(warning).toBe("threshold 80k (AUTO_HANDOFF_TOKENS) leaves 35k this session's 45k start: handing off at 85k instead")
+    calls.tokens = 81_000 // past 80k; the old math handed off here
+    await $.turn.complete(TURN)
+    await settle(() => false)
+    expect(calls.cleared).toBe(1)
+    expect(calls.toasts.filter(t => t.startsWith('threshold')).length).toBe(1) // warned once, not every turn
+    calls.tokens = 86_000 // floor + 40k
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 1)
+    expect(calls.cleared).toBe(2)
+  })
+
+  test('the headroom toast names /config when the threshold field is the source', { options: { threshold: 60_000 } }, async ($, on) => {
+    const calls = engine(on, { tokens: 65_000 })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    calls.tokens = 45_000
+    await $.turn.complete(TURN)
+    expect(calls.toasts.some(t => t.includes('(threshold in /config)'))).toBe(true)
+  })
+
+  test('no headroom toast at the default threshold', async ($, on) => {
+    const calls = engine(on, { tokens: 165_000 })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    calls.tokens = 45_000
+    await $.turn.complete(TURN)
+    expect(calls.toasts.some(t => t.startsWith('threshold'))).toBe(false)
   })
 
   test('progress guard: a typed prompt resumes handoffs', async ($, on) => {

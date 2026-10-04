@@ -11,19 +11,23 @@ import { SERVER_JS, parseAddress } from './server.ts'
 const BRIEF_DIR = '.claude/state/auto-handoff'
 // The two numbers are userConfig fields (plugin.json), set in /config. Defaults match the manifest.
 // threshold: matches HANDOFF_ARM_TOKENS in context-warning.ts.
-// GROWTH and maxUnattended are loop guards. A seeded session must grow GROWTH of the threshold past
-// its first-turn size before it can hand off again, and at most maxUnattended handoffs may run before
-// the user types a prompt. GROWTH is fixed: seeded sessions start near 45k, so at the default
-// threshold it never moves the line; it only matters when the threshold is set below a fresh
-// session's size. A fraction rather than a token count so a low threshold is not pushed far out. The 2026-10-03 live run (threshold 20k, seeded sessions start at ~31k) chained six times
-// without them. Progress, not time: a 15-minute chain cap could block a real session that fills fast.
+// MIN_HEADROOM and maxUnattended are loop guards. A seeded session must grow MIN_HEADROOM past its
+// first-turn size (its floor) before it can hand off again, and at most maxUnattended handoffs may
+// run before the user types a prompt. MIN_HEADROOM is fixed: seeded sessions start near 45k, so at
+// the default threshold it never moves the line; it only matters when the threshold is set low.
+// 40k is the empirical line where a seeded session can read its brief and still do real work. The
+// 2026-10-03 live run (threshold 20k, seeded sessions start at ~31k) chained six times with no
+// guard; the 2026-10-04 run (AUTO_HANDOFF_TOKENS=80000 left in a shell, floor ~45k) chained eight
+// times with a guard of a quarter of the threshold, because max(80k, 45k + 20k) is still 80k, and
+// 35k of room goes in reading the brief. Progress, not time: a 15-minute chain cap could block a
+// real session that fills fast.
 // The rest shape the brief: two template files and a pattern for files
 // that never count as edits.
 // viewer: where the mod serves the brief pages, "host:port"; "tailscale" as the host means this
 // machine's Tailscale IP, or 127.0.0.1 without Tailscale. Blank: no server, and the link is the local file.
 type Config = { threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp; viewer: string }
 const DEFAULTS: Config = { threshold: 160_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: 'tailscale:3846' }
-const GROWTH = 0.25
+const MIN_HEADROOM = 40_000
 // Each template's default, a file in the mod's templates/ folder.
 const TEMPLATES = [['briefTemplate', 'brief.md'], ['instructionsTemplate', 'instructions.md']] as const
 type TemplateKey = typeof TEMPLATES[number][0]
@@ -312,10 +316,32 @@ function toastHandedOff($: EngineInterface, sessionId: string, fresh: number) {
   handedFrom = undefined
 }
 
+// The configured threshold and where it came from. The env var wins so a test run needs no
+// /config change; it also outlives the test in that shell, which is why the headroom warning names it.
+async function configured($: EngineInterface): Promise<{ base: number; source: string }> {
+  const env = Number(await $.env.get('AUTO_HANDOFF_TOKENS'))
+  return env > 0 ? { base: env, source: 'AUTO_HANDOFF_TOKENS' } : { base: cfg.threshold, source: 'threshold in /config' }
+}
+
+// A seeded session hands off no sooner than MIN_HEADROOM past its floor, whatever the threshold says.
 async function thresholdFor($: EngineInterface, sessionId: string): Promise<number> {
-  // The env var wins so a test run needs no /config change.
-  const base = Number(await $.env.get('AUTO_HANDOFF_TOKENS')) || cfg.threshold
-  return sessionId === seededSession ? Math.max(base, (floor ?? 0) + Math.round(base * GROWTH)) : base
+  const { base } = await configured($)
+  return sessionId === seededSession ? Math.max(base, (floor ?? 0) + MIN_HEADROOM) : base
+}
+
+// Once per seeded session, as its floor lands: when the configured threshold leaves less than
+// MIN_HEADROOM above the floor, say so, with the number, the source, and where the line moved to.
+// Without this the 2026-10-04 chain looked like a guard bug; nobody had run `env | grep AUTO_HANDOFF`.
+let warnedSession: string | undefined
+async function warnTightThreshold($: EngineInterface, sessionId: string) {
+  if (floor === undefined || warnedSession === sessionId) return
+  warnedSession = sessionId
+  const { base, source } = await configured($)
+  const headroom = base - floor
+  if (headroom >= MIN_HEADROOM) return
+  await log($, `tight threshold session=${sessionId} threshold=${base} source=${source} floor=${floor} headroom=${headroom} effective=${floor + MIN_HEADROOM}`)
+  const left = headroom > 0 ? `leaves ${k(headroom)}` : 'is below'
+  $.ui.toast(`threshold ${k(base)} (${source}) ${left} this session's ${k(floor)} start: handing off at ${k(floor + MIN_HEADROOM)} instead`, { timeoutMs: TOAST_MS })
 }
 
 // A non-positive or non-numeric value falls back to the default rather than handing off at 0.
@@ -350,6 +376,7 @@ export const register: Register = (on, options) => {
         floor = tokens
         await log($, `floor set at turn end session=${sessionId} tokens=${tokens} (first response carried no usage)`)
         toastHandedOff($, sessionId, tokens)
+        await warnTightThreshold($, sessionId)
         return r
       }
       const threshold = await thresholdFor($, sessionId)
@@ -421,6 +448,7 @@ export const register: Register = (on, options) => {
       floor = r.usage.input_tokens + r.usage.cache_read_input_tokens + r.usage.cache_creation_input_tokens
       await log($, `floor session=${seededSession} tokens=${floor} (seed turn's first request)`)
       toastHandedOff($, seededSession!, floor)
+      await warnTightThreshold($, seededSession!)
     }
     return r
   })
