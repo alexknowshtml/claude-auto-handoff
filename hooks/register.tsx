@@ -1,12 +1,15 @@
-import type { EngineInterface, Register, Timer } from 'claude-code'
-import { assembleBrief, briefPrompt, extractFacts, isValidBrief, markUnverifiedFigures } from './brief.ts'
-import { chainOf, parseBrief, renderPage, viewerLink, withHeader } from './viewer.ts'
+import type { EngineInterface, Register, SessionMessage, Timer } from 'claude-code'
+import { assembleBrief, briefPrompt, extractFacts, factsBlock, forkPrompt, isValidBrief, markUnverifiedFigures, softNote } from './brief.ts'
+import type { Facts } from './brief.ts'
+import { chainOf, parseBrief, renderPage, sections, viewerLink, withHeader } from './viewer.ts'
 import type { Entry } from './viewer.ts'
 import { SERVER_JS, parseAddress } from './server.ts'
 import { isSpinning, panelTree } from './panel.tsx'
 import type { Line, Panel } from './panel.tsx'
-import { BRIEF_DIR, DEFAULTS, LAST_RESORT_INSTRUCTIONS, MIN_HEADROOM, SEED_PREFIX, TEMPLATES, expand, k, linkify, parseConfig, short } from './config.ts'
+import { BRIEF_DIR, DEFAULTS, LAST_RESORT_INSTRUCTIONS, MIN_HEADROOM, SEED_PREFIX, TEMPLATES, WINDOW_RESERVE, expand, k, linkify, parseConfig, parseTokens, short, SOFT_MARGIN } from './config.ts'
 import type { Config, TemplateKey } from './config.ts'
+import { HISTORY_HEADING, blockId, compressPrompt, digestPrompt, halfText, historySection, oneParagraph, parseLog, parseTree, pending as pendingBlocks, projectKey, repoRoot } from './history.ts'
+import type { Entry as HistoryEntry } from './history.ts'
 
 // At the token threshold, Haiku writes a handoff brief, the mod runs /clear, then seeds the
 // fresh session with a pointer to the brief. Interactive terminal sessions only: where a
@@ -49,6 +52,8 @@ let unmeasured = 0
 // tool output at CHARS_PER_TOKEN, which ran high in a live test (projected 83.7k, measured 72.5k)
 // and left a session that stopped working with no handoff.
 let gated: string | undefined
+// The session told it is near its handoff line: told once.
+let nudged: string | undefined
 // From the latest SessionStart; /clear starts a new transcript file.
 let transcriptPath: string | undefined
 
@@ -171,7 +176,130 @@ async function storedLineage($: EngineInterface, sessionId: string): Promise<Lin
   }
 }
 
-async function handoff($: EngineInterface, sessionId: string, tokens: number, threshold: number) {
+// ---------------------------------------------------------------- project history (history.ts)
+
+type ProjectHistory = { dir: string; logPath: string; treePath: string; entries: HistoryEntry[]; tree: Record<string, string> }
+const HISTORY_SYSTEM = 'You keep the long-term history of a software project: short, exact, durable.'
+// Compressions one run may make. Each is one Haiku call; what is left waits for the next run.
+const MAX_COMPRESSIONS = 16
+
+// The history of the repository the session works in (every worktree shares it), else of its cwd.
+async function projectHistory($: EngineInterface, home: string, cwd: string): Promise<ProjectHistory> {
+  let root: string | undefined
+  try {
+    const { exitCode, stdout } = await $.process.run(['git', '-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'])
+    if (exitCode === 0) root = repoRoot(stdout)
+  } catch {}
+  const dir = `${home}/${BRIEF_DIR}/history/${projectKey(root ?? cwd)}`
+  const logPath = `${dir}/log.jsonl`
+  const treePath = `${dir}/tree.json`
+  return { dir, logPath, treePath, entries: parseLog(await readText($, logPath) ?? ''), tree: parseTree(await readText($, treePath)) }
+}
+
+// One compression run at a time in this process, so two handoffs close together never build
+// the same block twice.
+let compressing = false
+
+// Builds the summaries the log now allows, smallest first, re-reading both files each round:
+// another session of the same project may be writing them too.
+async function compressPending($: EngineInterface, h: ProjectHistory) {
+  if (compressing) return
+  compressing = true
+  try {
+    for (let round = 0; round < MAX_COMPRESSIONS; round++) {
+      const entries = parseLog(await readText($, h.logPath) ?? '')
+      const tree = parseTree(await readText($, h.treePath))
+      const halvesOf = (b: readonly [number, number]) => {
+        const mid = (b[0] + b[1]) / 2
+        const a = halfText(entries, tree, [b[0], mid])
+        const z = halfText(entries, tree, [mid, b[1]])
+        return a && z ? [a, z] as const : undefined
+      }
+      const next = pendingBlocks(entries.length, b => !!tree[blockId(b)]).find(b => halvesOf(b))
+      if (!next) return
+      const r = await $.model.complete({ model: 'haiku', system: HISTORY_SYSTEM, prompt: compressPrompt(halvesOf(next)!), maxTokens: 400, timeoutMs: 60_000 })
+      if (!r.isAnswered || !r.text.trim()) {
+        await log($, `history compression #${blockId(next)} failed (${r.isAnswered ? 'empty' : r.reason}); the next run retries it`)
+        return
+      }
+      const latest = parseTree(await readText($, h.treePath))
+      latest[blockId(next)] = oneParagraph(r.text)
+      await $.fs.write(h.treePath, `${JSON.stringify(latest, null, 1)}\n`)
+    }
+  } catch (err) {
+    await log($, `history compression error ${String(err)}`)
+  } finally {
+    compressing = false
+  }
+}
+
+// Appends this session's entry to the project's log: Haiku's digest of the brief, else the
+// facts. Then builds whatever summaries that makes possible. Runs after the brief is on disk,
+// beside the /clear, so the handoff never waits for it.
+async function recordHistory($: EngineInterface, h: ProjectHistory, entry: Omit<HistoryEntry, 'text'>, source: string, fallback: string) {
+  try {
+    const r = await $.model.complete({ model: 'haiku', system: HISTORY_SYSTEM, prompt: digestPrompt(source), maxTokens: 400, timeoutMs: 60_000 })
+    const text = r.isAnswered && r.text.trim() ? oneParagraph(r.text) : oneParagraph(fallback)
+    await $.process.run(['mkdir', '-p', h.dir])
+    const current = await readText($, h.logPath) ?? ''
+    await $.fs.write(h.logPath, `${current}${current && !current.endsWith('\n') ? '\n' : ''}${JSON.stringify({ ...entry, text })}\n`)
+    await log($, `history entry #${parseLog(current).length} written ${h.logPath}${r.isAnswered ? '' : ` (digest failed: ${r.reason}; facts used)`}`)
+    await compressPending($, h)
+  } catch (err) {
+    await log($, `history error ${String(err)}`)
+  }
+}
+
+// A session's history entry when Haiku's digest failed: what the code knows for certain.
+const factsDigest = (f: Facts) => [
+  f.lastUserMessage && `Last request: ${f.lastUserMessage}`,
+  f.commits.length && `Commits: ${f.commits.join('; ')}`,
+  f.filesModified.length && `Files changed: ${f.filesModified.join(', ')}`,
+].filter(Boolean).join('. ') || 'Handed off with no digest.'
+
+// The brief a seeded session started from, as the next brief's prompt reads it: its sections
+// minus the ones written for the model, and minus its history, which the new brief carries anyway.
+async function previousBrief($: EngineInterface, path: string): Promise<string | undefined> {
+  const text = await readText($, path)
+  if (!text) return undefined
+  return sections(parseBrief(text).body).filter(s => !s.startsWith(HISTORY_HEADING)).join('\n\n') || undefined
+}
+
+// ---------------------------------------------------------------- the handoff
+
+type Written = { text: string; problem?: string; writer: 'tool' | 'fork' | 'haiku' }
+
+// Why a reply cannot be the brief: failed, empty or holding none of the template's sections.
+function unusable(r: { isAnswered: true; text: string } | { isAnswered: false; reason: string }, briefTemplate: string): string | undefined {
+  return !r.isAnswered ? r.reason : !r.text.trim() ? 'empty' : !isValidBrief(r.text, briefTemplate) ? 'no-sections' : undefined
+}
+
+// The fork asks the session's own model, whose transcript the API serves from cache, so the
+// brief sees every turn rather than the last 120 rendered messages. A fork that fails hands the
+// job to Haiku; a Haiku reply that fails leaves the facts alone.
+async function writeBrief($: EngineInterface, sessionId: string, messages: readonly SessionMessage[], facts: Facts, briefTemplate: string, previous: string | undefined): Promise<Written> {
+  if (cfg.briefWriter === 'fork') {
+    const r = await $.model.fork({ prompt: forkPrompt(facts, briefTemplate, previous) })
+      .catch((err: unknown) => ({ isAnswered: false as const, reason: `rejected: ${String(err)}` }))
+    const problem = unusable(r, briefTemplate)
+    if (!problem && r.isAnswered) return { text: r.text, writer: 'fork' }
+    await log($, `fork brief unusable session=${sessionId} reason=${problem}; asking haiku`)
+  }
+  const r = await $.model.complete({
+    model: 'haiku',
+    system: 'You summarize coding sessions into precise handoff briefs.',
+    prompt: briefPrompt(messages, facts, briefTemplate, previous),
+    maxTokens: 4_000,
+    timeoutMs: 60_000,
+  })
+  const problem = unusable(r, briefTemplate)
+  if (problem) await log($, `haiku brief unusable session=${sessionId} reason=${problem}; using facts-only brief`)
+  return { text: r.isAnswered ? r.text : '', problem, writer: 'haiku' }
+}
+
+// given: the brief the model passed to the handoff tool. Used when it holds the template's
+// sections; otherwise the brief is written here as if none came.
+async function handoff($: EngineInterface, sessionId: string, tokens: number, threshold: number, via: string, given?: string) {
   try {
     const own = sessionId === seededSession && lineage ? lineage : await storedLineage($, sessionId)
     const messages = await $.session.messages()
@@ -180,39 +308,37 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     facts.handoffTokens = tokens
     facts.threshold = threshold
     facts.thresholdSource = threshold > base ? `${source} (${k(base)}), raised to leave ${k(MIN_HEADROOM)} above the starting size` : source
+    facts.trigger = via.startsWith('tool') ? 'the handoff tool (the model asked)' : via.startsWith('command') ? '/handoff (the user asked)' : 'the context threshold'
     if (sessionId === seededSession && floor !== undefined) facts.seededSessionStartSize = floor
     facts.unattendedCount = unattended
     // A session with no lineage starts its chain. One seeded before depth existed stays unknown.
     const depth = own ? own.depth : 1
     if (depth !== undefined) facts.depth = depth
+    const home = await $.env.get('HOME') ?? ''
+    const cwd = await $.session.cwd()
+    const briefDir = `${home}/${BRIEF_DIR}`
+    const previous = own?.from ? await previousBrief($, `${briefDir}/${own.from}.md`) : undefined
+    const history = await projectHistory($, home, cwd)
     const briefTemplate = await template($, 'briefTemplate')
-    const result = await $.model.complete({
-      model: 'haiku',
-      system: 'You summarize coding sessions into precise handoff briefs.',
-      prompt: briefPrompt(messages, facts, briefTemplate),
-      maxTokens: 4_000,
-      timeoutMs: 60_000,
-    })
-    // A failed, empty or sectionless reply falls back to the facts.
-    const text = result.isAnswered ? result.text : ''
-    const problem = !result.isAnswered ? result.reason : !text.trim() ? 'empty' : !isValidBrief(text, briefTemplate) ? 'no-sections' : undefined
-    if (problem) await log($, `haiku brief unusable session=${sessionId} reason=${problem}; using facts-only brief`)
+    const fromTool = given !== undefined && isValidBrief(given, briefTemplate)
+    if (given !== undefined && !fromTool) await log($, `tool brief unusable session=${sessionId} (no template sections); writing one instead`)
+    const { text, problem, writer }: Written = fromTool ? { text: given, writer: 'tool' } : await writeBrief($, sessionId, messages, facts, briefTemplate, previous)
     const checked = markUnverifiedFigures(text, facts)
     if (!problem && checked.flagged.length) await log($, `brief figures not in Handoff Numbers session=${sessionId}: ${checked.flagged.join(', ')}`)
-    const home = await $.env.get('HOME')
-    const cwd = await $.session.cwd()
+    // Claude Code keeps transcripts under the cwd with every non-alphanumeric character as '-'.
+    const transcript = transcriptPath ?? `~/.claude/projects/${cwd.replace(/[^a-zA-Z0-9]/g, '-')}/${sessionId}.jsonl`
     const brief = assembleBrief({
       sessionId,
-      // Claude Code keeps transcripts under the cwd with every non-alphanumeric character as '-'.
-      transcript: transcriptPath ?? `~/.claude/projects/${cwd.replace(/[^a-zA-Z0-9]/g, '-')}/${sessionId}.jsonl`,
+      transcript,
       instructions: await template($, 'instructionsTemplate') || LAST_RESORT_INSTRUCTIONS,
-    }, facts, problem ? undefined : checked.text)
-    const briefDir = `${home}/${BRIEF_DIR}`
+      writer,
+    }, facts, problem ? undefined : checked.text, historySection(history.entries, history.tree, cfg.historyLines, history.logPath))
     const briefPath = `${briefDir}/${sessionId}.md`
     const pagesDir = `${briefDir}/pages`
     const chain = own?.chain ?? sessionId
     const header = { from: own?.from, chain, depth: depth !== undefined ? String(depth) : undefined, tokens: String(tokens), at: new Date().toISOString(), cwd }
     await $.fs.write(briefPath, withHeader(header, brief))
+    void recordHistory($, history, { at: header.at, session: sessionId, transcript }, problem ? factsBlock(facts) : checked.text, factsDigest(facts))
     const link = await viewer($, briefDir, pagesDir, sessionId)
     pending = { oldSession: sessionId, briefPath, tokens, chain, link, problem }
     steps($, [briefStep(problem), { mark: 'spin', text: 'clearing' }])
@@ -234,7 +360,7 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
 
 // Shared by turn.complete and turn.step: the fired, kill-switch and loop-guard checks, then
 // the handoff itself. Returns true when a handoff started.
-async function tryHandoff($: EngineInterface, sessionId: string, tokens: number, threshold: number, via: string): Promise<boolean> {
+async function tryHandoff($: EngineInterface, sessionId: string, tokens: number, threshold: number, via: string, given?: string): Promise<boolean> {
   const fired = await $.store.get(`fired:${sessionId}`)
   // Every caller checks inFlight first, so a 'briefing' marker seen here is an orphan: the
   // module reloaded mid-handoff and the brief never landed. Retry instead of going quiet.
@@ -267,7 +393,7 @@ async function tryHandoff($: EngineInterface, sessionId: string, tokens: number,
   showPanel($, { header: { mark: 'spin', text: `auto-handoff · ${k(tokens)} / ${k(threshold)}` }, steps: [{ mark: 'spin', text: 'writing brief' }] },
     `context ${k(tokens)} is past ${k(threshold)}: handing off`)
   // Not awaited: the brief can take a while and /clear only runs once the session is idle.
-  handoff($, sessionId, tokens, threshold).finally(() => { inFlight = false })
+  handoff($, sessionId, tokens, threshold, via, given).finally(() => { inFlight = false })
   return true
 }
 
@@ -369,15 +495,48 @@ function showHandedOff($: EngineInterface, fresh: number) {
 
 // The configured threshold and where it came from. The env var wins so a test run needs no
 // /config change; it also outlives the test in that shell, which is why the headroom warning names it.
+// `/handoff 60k` sets one session's threshold. It is keyed by session id, so it lapses with the
+// session: the fresh one after a handoff has a new id.
+let override: { session: string; tokens: number } | undefined
+
+// The threshold never sits within WINDOW_RESERVE of the window, so the 300k default still works
+// on a 200k window.
 async function configured($: EngineInterface): Promise<{ base: number; source: string }> {
   const env = Number(await $.env.get('AUTO_HANDOFF_TOKENS'))
-  return env > 0 ? { base: env, source: 'AUTO_HANDOFF_TOKENS' } : { base: cfg.threshold, source: 'threshold in /config' }
+  const own = override && override.session === await $.session.id() ? override.tokens : undefined
+  const { base, source } = own ? { base: own, source: '/handoff in this session' }
+    : env > 0 ? { base: env, source: 'AUTO_HANDOFF_TOKENS' }
+    : { base: cfg.threshold, source: 'threshold in /config' }
+  const window = (await $.session.usage()).context.window
+  const cap = typeof window === 'number' && window > WINDOW_RESERVE * 2 ? window - WINDOW_RESERVE : undefined
+  return cap !== undefined && base > cap ? { base: cap, source: `${source} (${k(base)}), capped at the ${k(window)} window less ${k(WINDOW_RESERVE)}` } : { base, source }
 }
 
 // A seeded session hands off no sooner than MIN_HEADROOM past its floor, whatever the threshold says.
 async function thresholdFor($: EngineInterface, sessionId: string): Promise<number> {
   const { base } = await configured($)
   return sessionId === seededSession ? Math.max(base, (floor ?? 0) + MIN_HEADROOM) : base
+}
+
+// Past the soft line the model is asked to hand off at its next boundary. Never below the point a
+// seeded session's handoff tool would refuse.
+async function softLine($: EngineInterface, sessionId: string): Promise<number> {
+  const threshold = await thresholdFor($, sessionId)
+  return sessionId === seededSession ? Math.max(threshold - SOFT_MARGIN, (floor ?? 0) + MIN_HEADROOM) : threshold - SOFT_MARGIN
+}
+
+// The note for this tool result, once per session, when the context has passed the soft line and
+// a handoff could start. Undefined otherwise.
+async function nudge($: EngineInterface, sessionId: string, projected: number): Promise<string | undefined> {
+  if (nudged === sessionId || inFlight || pending || unattended >= cfg.maxUnattended) return undefined
+  if (sessionId === seededSession && floor === undefined) return undefined
+  if (projected < await softLine($, sessionId) || !await canHandOff($, sessionId)) return undefined
+  const fired = await $.store.get(`fired:${sessionId}`)
+  if (fired && fired !== 'briefing') return undefined
+  nudged = sessionId
+  const threshold = await thresholdFor($, sessionId)
+  await log($, `soft line session=${sessionId} projected=${projected} threshold=${threshold}; asking for a handoff with a brief`)
+  return softNote(handoffTool($), projected, threshold, await template($, 'briefTemplate'))
 }
 
 // Once per seeded session, as its floor lands: when the configured threshold leaves less than
@@ -396,8 +555,70 @@ async function warnTightThreshold($: EngineInterface, sessionId: string) {
 }
 
 
+// ---------------------------------------------------------------- handing off on request
+
+const HANDOFF_TOOL = 'handoff'
+const handoffTool = ($: EngineInterface) => `mcp__${$.plugin.name}__${HANDOFF_TOOL}`
+const toolAnswer = (text: string) => ({ result: { content: [{ type: 'text' as const, text }], isError: false } })
+const HANDOFF_TOOL_DESCRIPTION = 'Hand this session off to a fresh one: the context is cleared and work resumes from a brief, with the project\'s history. Pass `brief`, written for a fresh session that sees none of this conversation (state, decisions, dead ends, next step); without it a brief is written for you, at extra cost. Call it when told the session is near its handoff line, when the user asks, or when a phase of work has just finished (committed, tests green) and the context is past about 100k tokens. Make no tool calls after it.'
+const HANDOFF_TOOL_SCHEMA = { type: 'object', properties: { brief: { type: 'string', description: 'The handoff brief, in the sections the handoff note lists.' } } }
+
+// The model's own call, at a phase boundary: hand off now, whatever the threshold says. A seeded
+// session must still do MIN_HEADROOM of work first, so a handoff cannot chain on itself.
+async function handoffByTool($: EngineInterface, agentId?: string, brief?: string) {
+  if (agentId) return toolAnswer('Not handed off: only the main session hands off.')
+  if (inFlight || pending) return toolAnswer('A handoff is already under way. Make no more tool calls; end your turn with one line.')
+  const sessionId = await $.session.id()
+  const tokens = (await $.session.usage()).context.tokens ?? 0
+  if (sessionId === seededSession && floor !== undefined && tokens < floor + MIN_HEADROOM)
+    return toolAnswer(`Not handed off: this session started at ${k(floor)} from a handoff and is at ${k(tokens)}. Do more work first.`)
+  const started = await tryHandoff($, sessionId, tokens, await thresholdFor($, sessionId), brief ? 'tool brief' : 'tool', brief)
+  return toolAnswer(started
+    ? 'Handoff started. The session clears and resumes from the brief once this turn ends. Make no more tool calls: end your turn with one line saying so.'
+    : 'Not handed off: auto-handoff is paused or turned off here, or this session already handed off. Carry on.')
+}
+
+// Summaries a crash or a closed session left unbuilt, built in the background at startup.
+async function catchUpHistory($: EngineInterface) {
+  try {
+    if (await paneVar($)) return
+    const h = await projectHistory($, await $.env.get('HOME') ?? '', await $.session.cwd())
+    if (h.entries.length > 1) await compressPending($, h)
+  } catch (err) {
+    await log($, `history catch-up error ${String(err)}`)
+  }
+}
+
 export const register: Register = (on, options) => {
   cfg = parseConfig(options)
+
+  // The handoff tool and /handoff, listed from the first turn. Not where the mod is switched off.
+  on('session.start', async ($, e, next) => {
+    try {
+      if (!await paneVar($)) {
+        await $.tool.register({ name: HANDOFF_TOOL, description: HANDOFF_TOOL_DESCRIPTION, inputSchema: HANDOFF_TOOL_SCHEMA })
+        await $.command.register({ name: 'handoff', description: 'Hand off to a fresh session now; /handoff 60k sets this session\'s threshold instead', argumentHint: '[threshold]' })
+      }
+    } catch (err) {
+      await log($, `register error ${String(err)}`)
+    }
+    return next(e)
+  })
+
+  on('command.run', { command: 'handoff' }, async ($, e) => {
+    const sessionId = await $.session.id()
+    if (e.args.trim()) {
+      const n = parseTokens(e.args)
+      if (!n) return { text: 'usage: /handoff hands off now; /handoff 60k sets this session\'s threshold' }
+      override = { session: sessionId, tokens: n }
+      await log($, `threshold override session=${sessionId} tokens=${n}`)
+      return { text: `auto-handoff: this session hands off at ${k(n)}` }
+    }
+    const tokens = (await $.session.usage()).context.tokens ?? 0
+    const started = await tryHandoff($, sessionId, tokens, await thresholdFor($, sessionId), 'command')
+    return { text: started ? 'auto-handoff: handing off now' : 'auto-handoff: not handing off here (paused, turned off, or already handed off)' }
+  })
+
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     try {
@@ -429,6 +650,10 @@ export const register: Register = (on, options) => {
   // 437k with no request in between for turn.step to stop. A refused call never runs; the
   // next request trips turn.step and the handoff goes through the normal path.
   on('tool.call', async ($, e, next) => {
+    if (e.tool === handoffTool($)) {
+      const brief = (e as { brief?: unknown }).brief
+      return handoffByTool($, e.agentId, typeof brief === 'string' && brief.trim() ? brief : undefined)
+    }
     if (!e.agentId) {
       try {
         const sessionId = await $.session.id()
@@ -445,7 +670,15 @@ export const register: Register = (on, options) => {
       }
     }
     const r = await next(e)
-    if (!e.agentId && typeof r.text === 'string') unmeasured += Math.ceil(r.text.length / CHARS_PER_TOKEN)
+    if (e.agentId || r.deny !== undefined) return r
+    if (typeof r.text === 'string') unmeasured += Math.ceil(r.text.length / CHARS_PER_TOKEN)
+    try {
+      const tokens = (await $.session.usage()).context.tokens
+      const note = tokens === undefined ? undefined : await nudge($, await $.session.id(), tokens + unmeasured)
+      if (note) return { ...r, context: [...(r.context ?? []), note] }
+    } catch (err) {
+      await log($, `soft line error ${String(err)}`)
+    }
     return r
   })
 
@@ -453,7 +686,14 @@ export const register: Register = (on, options) => {
   // crosses the threshold, end the turn here and hand off instead of sending a request
   // that may overflow the window.
   on('turn.step', async function* ($, e, next) {
-    if (!e.agentId && !inFlight && !pending && e.index > 0) {
+    // A handoff under way (the model's handoff call, mostly): end the turn without the request
+    // that would only carry the model's sign-off line over the whole context.
+    if (!e.agentId && (inFlight || pending) && e.index > 0) {
+      yield { kind: 'text', index: 0, text: '[auto-handoff] Handing off to a fresh session.' }
+      yield { kind: 'stop', stopReason: 'end_turn', usage: null }
+      return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null }
+    }
+    if (!e.agentId && e.index > 0) {
       try {
         const tokens = (await $.session.usage()).context.tokens
         const sessionId = await $.session.id()
@@ -547,6 +787,7 @@ export const register: Register = (on, options) => {
     if (e.source === 'startup') {
       await writeMissingTemplates($)
       await keepServing($)
+      void catchUpHistory($)
     }
     // A /clear of the person's own leaves no handoff to report; the panel from the last one goes too.
     if (e.source === 'clear' && !pending && !inFlight && shown) hidePanel($)
