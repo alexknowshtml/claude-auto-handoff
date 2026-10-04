@@ -20,7 +20,7 @@ const BRIEF_DIR = '.claude/state/auto-handoff'
 // The rest shape the brief: two template files and a pattern for files
 // that never count as edits.
 // viewer: where the mod serves the brief pages, "host:port"; "tailscale" as the host means this
-// machine's Tailscale IP. Blank, or no Tailscale: no server, and the link is the local file.
+// machine's Tailscale IP, or 127.0.0.1 without Tailscale. Blank: no server, and the link is the local file.
 type Config = { threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp; viewer: string }
 const DEFAULTS: Config = { threshold: 160_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: 'tailscale:3846' }
 const GROWTH = 0.25
@@ -111,20 +111,25 @@ async function writeMissingTemplates($: EngineInterface) {
   }
 }
 
-// The viewer server's address: the Tailscale host resolved to this machine's IPv4.
+// The viewer server's address: the Tailscale host resolved to this machine's IPv4, or localhost
+// when Tailscale is missing, logged out or has no address, so the link still opens on this machine.
 async function serveAddress($: EngineInterface): Promise<{ host: string; port: string } | undefined> {
   const addr = cfg.viewer ? parseAddress(cfg.viewer) : undefined
   if (!addr || addr.host !== 'tailscale') return addr
+  const local = { host: '127.0.0.1', port: addr.port }
   try {
     const { exitCode, stdout } = await $.process.run(['tailscale', 'ip', '-4'])
     const ip = stdout.trim().split('\n')[0]?.trim()
-    return exitCode === 0 && ip ? { host: ip, port: addr.port } : undefined
+    return exitCode === 0 && ip ? { host: ip, port: addr.port } : local
   } catch {
-    return undefined
+    return local
   }
 }
 
 let serving = false
+// The address this module's server listens on. Links use it, so a session that started on
+// localhost keeps handing out working links after Tailscale comes up.
+let servedAt: { host: string; port: string } | undefined
 let lastServeTry = 0
 // Starts the server unless this module already runs one. The spawn loop is the child's life: it
 // runs on after the caller returns and ends with the child or the module. A second session finds
@@ -132,6 +137,7 @@ let lastServeTry = 0
 function ensureServer($: EngineInterface, pagesDir: string, addr: { host: string; port: string }) {
   if (serving) return
   serving = true
+  servedAt = addr
   void (async () => {
     try {
       for await (const { text } of $.process.spawn({ argv: ['node', '-e', SERVER_JS, pagesDir, addr.host, addr.port] })) await log($, text.trim())
@@ -139,6 +145,7 @@ function ensureServer($: EngineInterface, pagesDir: string, addr: { host: string
       await log($, `viewer server failed ${String(err)}`)
     } finally {
       serving = false
+      servedAt = undefined
     }
   })()
 }
@@ -181,7 +188,7 @@ async function viewer($: EngineInterface, briefDir: string, pagesDir: string, se
     await writeChainPages($, briefDir, pagesDir, sessionId)
     const addr = await serveAddress($)
     if (addr) ensureServer($, pagesDir, addr)
-    return viewerLink(addr, pagesDir, sessionId)
+    return viewerLink(servedAt ?? addr, pagesDir, sessionId)
   } catch (err) {
     await log($, `viewer error session=${sessionId} ${String(err)}`)
     return ''

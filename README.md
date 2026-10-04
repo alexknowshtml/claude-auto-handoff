@@ -14,7 +14,7 @@ Auto-compact summarizes in place, and you can't control what it keeps. A handoff
 2. **Brief.** Haiku writes the brief from the transcript. If Haiku fails, a facts-only brief stands in. Briefs go to `~/.claude/state/auto-handoff/<session-id>.md`.
 3. **Clear and seed.** The mod runs `/clear` and sends the fresh session one line: read the brief and follow its Instructions section. In the transcript, that line's brief path and viewer URL are drawn as links. Claude Code makes them clickable only when it detects a terminal that supports links. Over plain SSH it usually doesn't, so set `FORCE_HYPERLINK=1` if your terminal handles links, or use the status line link below.
 4. **Toasts.** You see one toast when the threshold trips and one when the new session is measured, such as `↪ handed off · 1a2b3c4d → 5e6f7a8b · 162k → 45k`, followed by the brief's viewer link.
-5. **Viewer.** Each brief also gets a readable page in `~/.claude/state/auto-handoff/pages/`. The page shows the brief and every handoff in the same run, linked in order. The served link is short, like `http://100.x.y.z:3846/1a2b3c4d`, so it fits on one line on a phone. By default the mod serves these pages on your Tailscale IP at port 3846, so you can open them from any device on your tailnet. Devices off your tailnet can't reach them. The server starts with the first session that loads the mod and runs while that session is open; if it stops, including when the mod reloads, the next session to finish a turn starts it again. Without Tailscale, the link is the local file.
+5. **Viewer.** Each brief also gets a readable page in `~/.claude/state/auto-handoff/pages/`. The page shows the brief and every handoff in the same run, linked in order. The served link is short, like `http://100.x.y.z:3846/1a2b3c4d`, so it fits on one line on a phone. By default the mod serves these pages on your Tailscale IP at port 3846, so you can open them from any device on your tailnet. Devices off your tailnet can't reach them. The server starts with the first session that loads the mod and runs while that session is open; if it stops, including when the mod reloads, the next session to finish a turn starts it again. Without Tailscale, the mod serves on `127.0.0.1` instead, so the link opens only on this machine. If Tailscale comes up later, a session already serving on localhost keeps using it; the next new session can serve on the Tailscale IP.
 6. **Status line link (optional).** `statusline/handoff-link.sh` wraps your status line command and adds a `↪ <link>` line when the session came from a handoff. Set it as the `statusLine` command in `~/.claude/settings.json`, with your existing command after it:
 
    ```json
@@ -51,7 +51,7 @@ Every setting is a row in `/config` under auto-handoff. They're stored in `~/.cl
 | `briefTemplate` | `~/.claude/auto-handoff/brief.md` | Your copy of the sections Haiku writes |
 | `instructionsTemplate` | `~/.claude/auto-handoff/instructions.md` | Your copy of what the fresh session is told to do |
 | `ignoreFiles` | blank | Regex for edited files to leave out of the brief, such as caches or synced state |
-| `viewer` | `tailscale:3846` | Where to serve the brief pages, as `host:port`. `tailscale` as the host means this machine's Tailscale IP. Leave blank for no server |
+| `viewer` | `tailscale:3846` | Where to serve the brief pages, as `host:port`. `tailscale` as the host means this machine's Tailscale IP, or `127.0.0.1` when Tailscale isn't set up. Leave blank for no server; the link is then the local file |
 
 Environment variables:
 

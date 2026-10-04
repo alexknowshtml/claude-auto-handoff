@@ -212,6 +212,15 @@ describe('auto-handoff', () => {
     expect(brief).toContain('## Last Real User Message (verbatim)\nplease refactor the parser')
   })
 
+  test('a blank viewer setting means no server, and the link is the local file', { options: { viewer: '' } }, async ($, on) => {
+    const calls = engine(on, { tokens: 165_000 })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    expect(calls.seeded[0]).toContain('file:///home/test/.claude/state/auto-handoff/pages/old-session.html')
+  })
+
   test('the threshold userConfig field sets the threshold', { options: { threshold: 100_000 } }, async ($, on) => {
     const calls = engine(on, { tokens: 120_000 })
     await $.turn.complete(TURN)
@@ -252,8 +261,8 @@ describe('auto-handoff', () => {
     expect(calls.written[`${dir}/pages/old-session.html`]).toContain('Session Context')
     await $.classic.SessionStart({ source: 'clear' })
     await settle(() => calls.seeded.length > 0)
-    // No Tailscale in the test, so the link is the local file.
-    expect(calls.seeded[0]).toContain(`file://${dir}/pages/old-session.html`)
+    // No Tailscale in the test, so the server falls back to localhost.
+    expect(calls.seeded[0]).toContain('(readable copy: http://127.0.0.1:3846/old-sess)')
     expect(parseBrief(calls.written[`${dir}/old-session.md`] ?? '').header.to).toBe('new-session-1')
     // The seeded session hands off in turn: same chain, and its brief points back.
     // The seeded session's first turn sets its floor; the next one past the line hands off.
@@ -553,7 +562,7 @@ describe('auto-handoff', () => {
 
     calls.tokens = 47_000
     await step($, 0) // the seed turn's first request
-    expect(calls.toasts[1]).toBe('↪ handed off · old-sess → new-sess · 165k → 47k · file:///home/test/.claude/state/auto-handoff/pages/old-session.html')
+    expect(calls.toasts[1]).toBe('↪ handed off · old-sess → new-sess · 165k → 47k · http://127.0.0.1:3846/old-sess')
     await step($, 1)
     expect(calls.toasts.length).toBe(2)
   })
