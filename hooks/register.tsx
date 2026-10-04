@@ -52,10 +52,29 @@ let gated: string | undefined
 // From the latest SessionStart; /clear starts a new transcript file.
 let transcriptPath: string | undefined
 
+// Windows sets USERPROFILE, not HOME. With HOME unset, every path built on it began with
+// "undefined/", which $.fs resolves under the session's working directory: briefs, templates
+// and pages landed inside the user's project.
+async function homeDir($: EngineInterface): Promise<string | undefined> {
+  return (await $.env.get('HOME')) || (await $.env.get('USERPROFILE'))
+}
+
 async function log($: EngineInterface, line: string) {
   try {
-    const home = await $.env.get('HOME')
-    await $.process.run(['sh', '-c', 'mkdir -p "$(dirname "$2")" && printf "%s\\n" "$1" >> "$2"', 'sh', `${new Date().toISOString()} ${line}`, `${home}/${BRIEF_DIR}/auto-handoff.log`])
+    const path = `${await homeDir($)}/${BRIEF_DIR}/auto-handoff.log`
+    const stamped = `${new Date().toISOString()} ${line}`
+    // Where there is a `sh`, append: an append is atomic, so concurrent sessions and the viewer
+    // server (which appends its own output here) never drop each other's lines.
+    try {
+      const { exitCode } = await $.process.run(['sh', '-c', 'mkdir -p "$(dirname "$2")" && printf "%s\\n" "$1" >> "$2"', 'sh', stamped, path])
+      if (exitCode === 0) return
+    } catch {}
+    // Windows has no `sh`. $.fs has no append, so the log is read and rewritten: two lines logged
+    // at the same instant can lose one. It keeps the last ~500 KB, cut at a line, so a read never
+    // hits $.fs's 4 MiB cap.
+    const old = await $.fs.read(path).catch(() => '')
+    const kept = typeof old !== 'string' ? '' : old.length > 1_000_000 ? old.slice(old.indexOf('\n', old.length - 500_000) + 1) : old
+    await $.fs.write(path, `${kept}${stamped}\n`)
   } catch {}
 }
 
@@ -71,13 +90,13 @@ const shipped = ($: EngineInterface, key: TemplateKey) => `${$.plugin.root}/temp
 
 // The template file at its configured path, else the default the mod ships, else ''.
 async function template($: EngineInterface, key: TemplateKey): Promise<string> {
-  return await readText($, expand(cfg[key], await $.env.get('HOME') ?? '')) ?? await readText($, shipped($, key)) ?? ''
+  return await readText($, expand(cfg[key], await homeDir($) ?? '')) ?? await readText($, shipped($, key)) ?? ''
 }
 
 // A new session writes each template to its path if nothing is there yet, so the files exist
 // to be edited. A file the user wrote is never touched.
 async function writeMissingTemplates($: EngineInterface) {
-  const home = await $.env.get('HOME') ?? ''
+  const home = await homeDir($) ?? ''
   for (const [key] of TEMPLATES) {
     const path = expand(cfg[key], home)
     try { await $.fs.read(path); continue } catch {}
@@ -109,7 +128,7 @@ let lastServeTry = 0
 // Its output goes to the mod's log.
 async function launchServer($: EngineInterface, pagesDir: string, addr: { host: string; port: string }) {
   try {
-    const home = await $.env.get('HOME')
+    const home = await homeDir($)
     await $.process.run(['sh', '-c', 'mkdir -p "$1"; if command -v setsid >/dev/null 2>&1; then d=setsid; else d=nohup; fi; $d node -e "$2" "$1" "$3" "$4" >>"$5" 2>&1 </dev/null &',
       'sh', pagesDir, SERVER_JS, addr.host, addr.port, `${home}/${BRIEF_DIR}/auto-handoff.log`])
   } catch (err) {
@@ -124,7 +143,7 @@ async function keepServing($: EngineInterface) {
   if (Date.now() - lastServeTry < 300_000) return
   lastServeTry = Date.now()
   const addr = await serveAddress($)
-  const home = await $.env.get('HOME')
+  const home = await homeDir($)
   if (addr && home) await launchServer($, `${home}/${BRIEF_DIR}/pages`, addr)
 }
 
@@ -199,7 +218,7 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     if (problem) await log($, `haiku brief unusable session=${sessionId} reason=${problem}; using facts-only brief`)
     const checked = markUnverifiedFigures(text, facts)
     if (!problem && checked.flagged.length) await log($, `brief figures not in Handoff Numbers session=${sessionId}: ${checked.flagged.join(', ')}`)
-    const home = await $.env.get('HOME')
+    const home = await homeDir($)
     const cwd = await $.session.cwd()
     const brief = assembleBrief({
       sessionId,
