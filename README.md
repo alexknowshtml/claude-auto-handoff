@@ -14,7 +14,7 @@ Auto-compact summarizes in place, and you can't control what it keeps. A handoff
 2. **Brief.** Haiku writes the brief from the transcript. If Haiku fails, a facts-only brief stands in. Briefs go to `~/.claude/state/auto-handoff/<session-id>.md`.
 3. **Clear and seed.** The mod runs `/clear` and sends the fresh session one line: read the brief and follow its Instructions section.
 4. **Toasts.** You see one toast when the threshold trips and one when the new session is measured, such as `↪ handed off · 1a2b3c4d → 5e6f7a8b · 162k → 45k`, followed by the brief's viewer link.
-5. **Viewer.** Each brief also gets a readable page in `~/.claude/state/auto-handoff/pages/`. The page shows the brief and every earlier handoff in the same chain, linked in order. By default the mod serves these pages on your Tailscale IP at port 3846, so you can open them from any device on your tailnet. Nothing else on the machine can reach them. The server runs while a Claude Code session with the mod is open. Without Tailscale, the link is the local file.
+5. **Viewer.** Each brief also gets a readable page in `~/.claude/state/auto-handoff/pages/`. The page shows the brief and every earlier handoff in the same chain, linked in order. By default the mod serves these pages on your Tailscale IP at port 3846, so you can open them from any device on your tailnet. Devices off your tailnet can't reach them. The server starts with the first session that loads the mod and runs while that session is open; if it stops, the next session to finish a turn starts it again. Without Tailscale, the link is the local file.
 
 Loop guards stop a fresh session that starts large from handing off again right away. They also cap how many handoffs run in a row before you type something.
 
@@ -49,8 +49,8 @@ Every setting is a row in `/config` under auto-handoff. They're stored in `~/.cl
 Environment variables:
 
 - `AUTO_HANDOFF_TOKENS=60000` overrides the threshold for one run, so you can watch a handoff without filling 160k first.
-- `AUTO_HANDOFF_DISABLE=1` turns the mod off for one session.
-- `DISABLE_AUTO_COMPACT` also turns it off. When something else manages the context limit, such as a wrapper that pipes the session, `/clear` would break that pipe.
+- `AUTO_HANDOFF_DISABLE=1` turns the mod off for one session, viewer server included.
+- `DISABLE_AUTO_COMPACT` also turns it off. When something else manages the context limit, such as a wrapper that pipes the session, `/clear` would break that pipe. The viewer server still runs there.
 
 ## Change the brief's structure and rules
 
