@@ -41,6 +41,16 @@ const TOAST_MS = 30_000
 
 type Pending = { oldSession: string; briefPath: string; tokens: number; chain: string; link: string }
 
+// The seed prompt's first characters; the render hook knows the seed row by them.
+const SEED_PREFIX = '[auto-handoff] ↪ Handoff from session'
+// The seed text with its brief path and viewer URL as markdown links. The path becomes a
+// file: link labelled by its file name; the URL links to itself. Exported for the test.
+export function linkify(text: string): string {
+  return text
+    .replace(/(?<=\bat )(\/\S+\.md)(?=[\s)]|$)/, (p) => `[${p.slice(p.lastIndexOf('/') + 1)}](file://${p})`)
+    .replace(/(https?:\/\/[^\s)]+)/, (u) => `[${u}](${u})`)
+}
+
 const k = (n: number) => `${Math.round(n / 1000)}k`
 const short = (sessionId: string) => sessionId.slice(0, 8)
 
@@ -417,6 +427,17 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // The seed row in the transcript: the brief path and the viewer URL drawn as links, so a
+  // click opens them. The stored message stays as submitted; only the drawing changes. A
+  // Markdown element linkifies http:, https: and file: (the Link element refuses the
+  // Tailscale IP), and the toast cannot carry links at all.
+  on('ui.render', { component: 'UserMessage', props: { origin: { kind: 'plugin' } } }, async ($, e, next) => {
+    const origin = e.props.origin
+    if (origin.kind !== 'plugin' || origin.name !== $.plugin.name || !e.props.text.startsWith(SEED_PREFIX)) return next(e)
+    const { Markdown } = $.ui.resolve(e)
+    return <Markdown text={linkify(e.props.text)} />
+  })
+
   on('prompt.submit', async ($, e, next) => {
     if (e.origin && USER_ORIGINS.has(e.origin.kind)) {
       unattended = 0
@@ -455,7 +476,7 @@ export const register: Register = (on, options) => {
       }
       // One line on screen; the model reads the brief from disk. A full brief as the
       // seed showed up as a wall of text the person never wrote.
-      const text = `[auto-handoff] ↪ Handoff from session ${short(p.oldSession)}. The previous session hit its context limit and was cleared. Read the brief at ${p.briefPath} before doing anything else${p.link ? ` (readable copy: ${p.link})` : ''} and follow its Instructions section. Open your first reply with the line "↪ Handoff from session ${short(p.oldSession)}".`
+      const text = `${SEED_PREFIX} ${short(p.oldSession)}. The previous session hit its context limit and was cleared. Read the brief at ${p.briefPath} before doing anything else${p.link ? ` (readable copy: ${p.link})` : ''} and follow its Instructions section. Open your first reply with the line "↪ Handoff from session ${short(p.oldSession)}".`
       $.prompt.submit({ text }).catch((err: unknown) => log($, `seed rejected ${String(err)}`))
     } catch (err) {
       await log($, `seed error ${String(err)}`)

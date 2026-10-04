@@ -12,7 +12,7 @@ Auto-compact summarizes in place, and you can't control what it keeps. A handoff
 
 1. **Threshold.** The mod checks the context size after each turn and before each model request, including tool output that hasn't been measured yet. Once it's past the threshold, the mod refuses new tool calls, so one burst of reads can't overflow the window.
 2. **Brief.** Haiku writes the brief from the transcript. If Haiku fails, a facts-only brief stands in. Briefs go to `~/.claude/state/auto-handoff/<session-id>.md`.
-3. **Clear and seed.** The mod runs `/clear` and sends the fresh session one line: read the brief and follow its Instructions section.
+3. **Clear and seed.** The mod runs `/clear` and sends the fresh session one line: read the brief and follow its Instructions section. In the transcript, that line's brief path and viewer URL are drawn as links, so a click opens them.
 4. **Toasts.** You see one toast when the threshold trips and one when the new session is measured, such as `↪ handed off · 1a2b3c4d → 5e6f7a8b · 162k → 45k`, followed by the brief's viewer link.
 5. **Viewer.** Each brief also gets a readable page in `~/.claude/state/auto-handoff/pages/`. The page shows the brief and every earlier handoff in the same chain, linked in order. By default the mod serves these pages on your Tailscale IP at port 3846, so you can open them from any device on your tailnet. Devices off your tailnet can't reach them. The server starts with the first session that loads the mod and runs while that session is open; if it stops, the next session to finish a turn starts it again. Without Tailscale, the link is the local file.
 
