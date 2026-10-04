@@ -53,6 +53,20 @@ Test it.`
     expect(page).not.toContain('</script><b>')
   })
 
+  test('previous and next follow the chain, even where a header lost its from', () => {
+    const e = (id: string, at: string, header: Record<string, string>) => ({ id, header: { at, ...header }, body: '' })
+    const a = e('aaaaaaaa-1', '1', { to: 'bbbbbbbb-2' })
+    const b = e('bbbbbbbb-2', '2', { to: 'cccccccc-3' }) // a reload dropped its from
+    const c = e('cccccccc-3', '3', { from: 'bbbbbbbb-2', to: 'dddddddd-4' })
+    const mid = renderPage(b, [a, b, c])
+    expect(mid).toContain('<a href="aaaaaaaa-1.html">← previous</a>')
+    expect(mid).toContain('<a href="cccccccc-3.html">next →</a>')
+    const last = renderPage(c, [a, b, c])
+    expect(last).toContain('next: dddddddd, still running')
+    expect(last).not.toContain('href="dddddddd-4.html"')
+    expect(renderPage(a, [a, b, c])).not.toContain('← previous')
+  })
+
   test('sections extracts visible sections', () => {
     const body = `## Work in Progress
 Doing X

@@ -77,17 +77,19 @@ const chip = (id: string, current: boolean) => `<span class="chip${current ? ' o
 
 /** The page for one brief. chain is every brief in its chain, oldest first (the brief itself included). */
 export function renderPage(entry: Entry, chain: readonly Entry[]): string {
-  const ids = new Set(chain.map(e => e.id))
   const { header } = entry
-  const link = (id: string | undefined, label: string) =>
-    id && ids.has(id) ? `<a href="${esc(id)}.html">${label}</a>` : id ? `<span>${label}</span>` : ''
+  // Previous and next are the neighbours in the chain, not the header's from/to: a header can
+  // miss a link the chain recovered. The last brief's session has no page until it hands off.
+  const at = chain.findIndex(e => e.id === entry.id)
+  const prev = chain[at - 1]
+  const next = at >= 0 ? chain[at + 1] : undefined
   const meta = [
     chip(entry.id, false),
     `<span>${esc(when(header.at))}${esc(tokens(header.tokens))}</span>`,
     header.cwd ? `<span>${esc(header.cwd)}</span>` : '',
-    link(header.from !== entry.id ? header.from : undefined, '← previous'),
-    // The brief's own session handed off to `to`; that page exists once `to` hands off too.
-    header.to ? link(header.to, `→ ${esc(short(header.to))}`) : '',
+    prev ? `<a href="${esc(prev.id)}.html">← previous</a>` : '',
+    next ? `<a href="${esc(next.id)}.html">next →</a>`
+      : header.to ? `<span title="${esc(header.to)}">next: ${esc(short(header.to))}, still running</span>` : '',
   ].filter(Boolean).join('')
   const rows = chain.length > 1 ? chain.map((e, i) => {
     const current = e.id === entry.id
