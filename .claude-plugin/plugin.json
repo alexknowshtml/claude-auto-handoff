@@ -38,6 +38,12 @@
       "title": "Ignored files (regex)",
       "description": "Edited files matching this pattern are left out of the brief, such as auto-synced state or caches. Leave blank for none.",
       "default": ""
+    },
+    "viewer": {
+      "type": "string",
+      "title": "Viewer address",
+      "description": "Where the mod serves a readable page for each brief, as host:port. \"tailscale\" as the host means this machine's Tailscale IP, so only your tailnet can open it. Leave blank for no server; the link is then the local file.",
+      "default": "tailscale:3846"
     }
   }
 }

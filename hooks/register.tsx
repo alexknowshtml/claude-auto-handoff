@@ -1,7 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { assembleBrief, briefPrompt, extractFacts, isValidBrief } from './brief.ts'
-import { parseBrief, renderAndWrite, viewerLink, withHeader } from './viewer.ts'
-import { startServer } from './server.ts'
+import { parseBrief, viewerLink, withHeader, writeChainPages } from './viewer.ts'
+import { ensureServer, resolveServe } from './server.ts'
 
 // At the token threshold, Haiku writes a handoff brief, the mod runs /clear, then seeds the
 // fresh session with a pointer to the brief. Interactive terminal sessions only: where a
@@ -18,8 +18,10 @@ const BRIEF_DIR = '.claude/state/auto-handoff'
 // without them. Progress, not time: a 15-minute chain cap could block a real session that fills fast.
 // The rest shape the brief: two template files and a pattern for files
 // that never count as edits.
-type Config = { threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp }
-const DEFAULTS: Config = { threshold: 160_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md' }
+// viewer: where the mod serves the brief pages, "host:port"; "tailscale" as the host means this
+// machine's Tailscale IP. Blank, or no Tailscale: no server, and the link is the local file.
+type Config = { threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp; viewer: string }
+const DEFAULTS: Config = { threshold: 160_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: 'tailscale:3846' }
 const GROWTH = 0.25
 // Each template's default, a file in the mod's templates/ folder.
 const TEMPLATES = [['briefTemplate', 'brief.md'], ['instructionsTemplate', 'instructions.md']] as const
@@ -36,7 +38,7 @@ const CHARS_PER_TOKEN = 4
 // No band or status entry: the host draws a status entry as "⚠ auto-handoff:", which reads as an error.
 const TOAST_MS = 30_000
 
-type Pending = { oldSession: string; briefPath: string; tokens: number }
+type Pending = { oldSession: string; briefPath: string; tokens: number; chain: string; link: string }
 
 const k = (n: number) => `${Math.round(n / 1000)}k`
 const short = (sessionId: string) => sessionId.slice(0, 8)
@@ -49,7 +51,9 @@ let floor: number | undefined
 let unattended = 0 // handoffs since the user last typed a prompt
 let pausedSession: string | undefined
 // The handoff the fresh session came from, until its first request is measured and toasted.
-let handedFrom: { session: string; tokens: number } | undefined
+let handedFrom: { session: string; tokens: number; link: string } | undefined
+// The seeded session's place in its chain of handoffs, for its own brief's header.
+let lineage: { from: string; chain: string } | undefined
 // Tokens added since the last response measured the context: tool results and the
 // response's own output. turn.complete alone missed a turn whose reads jumped from 63k
 // straight past the window, because the request that would have measured it failed.
@@ -93,6 +97,25 @@ async function writeMissingTemplates($: EngineInterface) {
   }
 }
 
+async function serveAddress($: EngineInterface) {
+  return cfg.viewer ? await resolveServe($, cfg.viewer) : undefined
+}
+
+// Writes the pages for sessionId's chain and makes sure the server is up. Returns the page's
+// link, or '' when the pages could not be written. Never throws: the viewer is not the handoff.
+async function viewer($: EngineInterface, briefDir: string, pagesDir: string, sessionId: string): Promise<string> {
+  try {
+    await $.process.run(['mkdir', '-p', pagesDir])
+    await writeChainPages($, briefDir, pagesDir, sessionId)
+    const addr = await serveAddress($)
+    if (addr) ensureServer($, pagesDir, addr, line => log($, line))
+    return viewerLink(addr, pagesDir, sessionId)
+  } catch (err) {
+    await log($, `viewer error session=${sessionId} ${String(err)}`)
+    return ''
+  }
+}
+
 async function handoff($: EngineInterface, sessionId: string, tokens: number) {
   try {
     const messages = await $.session.messages()
@@ -117,37 +140,15 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number) {
       transcript: transcriptPath ?? `~/.claude/projects/${cwd.replace(/[^a-zA-Z0-9]/g, '-')}/${sessionId}.jsonl`,
       instructions: await template($, 'instructionsTemplate') || LAST_RESORT_INSTRUCTIONS,
     }, facts, problem ? undefined : text)
-    const briefPath = `${home}/${BRIEF_DIR}/${sessionId}.md`
-    const pagesDir = `${home}/${BRIEF_DIR}/pages`
-    try {
-      await $.fs.list(pagesDir)
-    } catch {
-      await $.fs.write(`${pagesDir}/.gitkeep`, '')
-    }
-
-    // Add viewer infrastructure to the brief
-    let finalBrief = brief
-    try {
-      const { header, body } = parseBrief(brief)
-      header.chain = header.chain || sessionId
-      const serve = await startServer($, pagesDir)
-      header.viewer = viewerLink('', serve, pagesDir, sessionId)
-      finalBrief = withHeader(header, body)
-    } catch (err) {
-      await log($, `viewer setup error ${String(err)}`)
-    }
-
-    await $.fs.write(briefPath, finalBrief)
-
-    // Render the viewer page
-    try {
-      await renderAndWrite($, briefPath, pagesDir)
-      await log($, `viewer written ${pagesDir}/${sessionId}.html`)
-    } catch (err) {
-      await log($, `viewer write error ${String(err)}`)
-    }
-
-    pending = { oldSession: sessionId, briefPath, tokens }
+    const briefDir = `${home}/${BRIEF_DIR}`
+    const briefPath = `${briefDir}/${sessionId}.md`
+    const pagesDir = `${briefDir}/pages`
+    const own = sessionId === seededSession ? lineage : undefined
+    const chain = own?.chain ?? sessionId
+    const header = { from: own?.from, chain, tokens: String(tokens), at: new Date().toISOString(), cwd }
+    await $.fs.write(briefPath, withHeader(header, brief))
+    const link = await viewer($, briefDir, pagesDir, sessionId)
+    pending = { oldSession: sessionId, briefPath, tokens, chain, link }
     await $.store.set(`fired:${sessionId}`, problem ? `clearing-facts-only:${problem}` : 'clearing')
     await log($, `brief written ${briefPath} (${brief.length} chars); queueing /clear`)
     $.command.run({ command: 'clear' }).catch(async (err: unknown) => {
@@ -219,7 +220,7 @@ async function canHandOff($: EngineInterface, sessionId: string): Promise<boolea
 // The fresh session's first measurement: the one toast that says the handoff worked.
 function toastHandedOff($: EngineInterface, sessionId: string, fresh: number) {
   if (!handedFrom) return
-  $.ui.toast(`↪ handed off · ${short(handedFrom.session)} → ${short(sessionId)} · ${k(handedFrom.tokens)} → ${k(fresh)}`, { timeoutMs: TOAST_MS })
+  $.ui.toast(`↪ handed off · ${short(handedFrom.session)} → ${short(sessionId)} · ${k(handedFrom.tokens)} → ${k(fresh)}${handedFrom.link ? ` · ${handedFrom.link}` : ''}`, { timeoutMs: TOAST_MS })
   handedFrom = undefined
 }
 
@@ -245,6 +246,7 @@ export const register: Register = (on, options) => {
     briefTemplate: str(options.briefTemplate, DEFAULTS.briefTemplate),
     instructionsTemplate: str(options.instructionsTemplate, DEFAULTS.instructionsTemplate),
     ignoreFiles: pattern(options.ignoreFiles),
+    viewer: typeof options.viewer === 'string' ? options.viewer.trim() : DEFAULTS.viewer,
   }
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
@@ -365,7 +367,16 @@ export const register: Register = (on, options) => {
   on('classic.SessionStart', async ($, e, next) => {
     const r = await next(e)
     if (e.transcript_path) transcriptPath = e.transcript_path
-    if (e.source === 'startup') await writeMissingTemplates($)
+    if (e.source === 'startup') {
+      await writeMissingTemplates($)
+      // Serve the existing pages from the start, so an old link works once a session is open.
+      // Not in a pane the mod never hands off from.
+      if (!await paneVar($)) {
+        const addr = await serveAddress($)
+        const home = await $.env.get('HOME')
+        if (addr && home) ensureServer($, `${home}/${BRIEF_DIR}/pages`, addr, line => log($, line))
+      }
+    }
     if (e.source !== 'clear' || !pending) return r
     const p = pending
     pending = undefined
@@ -376,28 +387,20 @@ export const register: Register = (on, options) => {
       unmeasured = 0
       await $.store.set(`fired:${p.oldSession}`, `seeded:${newSession}`)
       await log($, `seeding new=${newSession} from=${p.oldSession}`)
-      handedFrom = { session: p.oldSession, tokens: p.tokens }
-
-      // Update the old brief's header with the handoff link and re-render the chain
+      handedFrom = { session: p.oldSession, tokens: p.tokens, link: p.link }
+      lineage = { from: p.oldSession, chain: p.chain }
+      // The old brief learns where it went, and its chain's pages link forward.
       try {
-        const oldBrief = await $.fs.read(p.briefPath)
-        if (typeof oldBrief === 'string') {
-          const { header, body } = parseBrief(oldBrief)
-          header.from = header.from || p.oldSession
-          header.to = newSession
-          const updatedBrief = withHeader(header, body)
-          await $.fs.write(p.briefPath, updatedBrief)
-          const briefDir = p.briefPath.replace(/\/[^/]+$/, '')
-          const pagesDir = `${briefDir}/pages`
-          await renderAndWrite($, p.briefPath, pagesDir)
-          await log($, `header updated ${p.briefPath} to=${newSession}`)
-        }
+        const old = parseBrief(await $.fs.read(p.briefPath) as string)
+        await $.fs.write(p.briefPath, withHeader({ ...old.header, to: newSession }, old.body))
+        const briefDir = p.briefPath.replace(/\/[^/]+$/, '')
+        await viewer($, briefDir, `${briefDir}/pages`, p.oldSession)
       } catch (err) {
-        await log($, `header update error ${String(err)}`)
+        await log($, `viewer forward link failed ${String(err)}`)
       }
       // One line on screen; the model reads the brief from disk. A full brief as the
       // seed showed up as a wall of text the person never wrote.
-      const text = `[auto-handoff] ↪ Handoff from session ${short(p.oldSession)}. The previous session hit its context limit and was cleared. Read the brief at ${p.briefPath} before doing anything else and follow its Instructions section. Open your first reply with the line "↪ Handoff from session ${short(p.oldSession)}".`
+      const text = `[auto-handoff] ↪ Handoff from session ${short(p.oldSession)}. The previous session hit its context limit and was cleared. Read the brief at ${p.briefPath} before doing anything else${p.link ? ` (readable copy: ${p.link})` : ''} and follow its Instructions section. Open your first reply with the line "↪ Handoff from session ${short(p.oldSession)}".`
       $.prompt.submit({ text }).catch((err: unknown) => log($, `seed rejected ${String(err)}`))
     } catch (err) {
       await log($, `seed error ${String(err)}`)

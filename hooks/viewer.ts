@@ -27,16 +27,9 @@ export function withHeader(header: Header, body: string): string {
   return `---\n${lines.join('\n')}\n---\n${body}`
 }
 
-/** viewerUrl with {sessionId} filled in. Blank: the served address when serve is set, else the local file. */
-export function viewerLink(template: string, serve: string, pagesDir: string, sessionId: string): string {
-  const t = template || (serve ? `http://${serve}/{sessionId}.html` : `file://${pagesDir}/{sessionId}.html`)
-  return t.replaceAll('{sessionId}', sessionId)
-}
-
-/** "host:port" for the static server, or undefined when the value is not one. */
-export function parseServe(v: string): { host: string; port: string } | undefined {
-  const m = /^([\w.-]+|\[[\da-f:]+\]):(\d{2,5})$/i.exec(v.trim())
-  return m ? { host: m[1]!.replace(/^\[|\]$/g, ''), port: m[2]! } : undefined
+/** The page's address: served when the mod runs a server, else the local file. */
+export function viewerLink(serve: { host: string; port: string } | undefined, pagesDir: string, sessionId: string): string {
+  return serve ? `http://${serve.host}:${serve.port}/${sessionId}.html` : `file://${pagesDir}/${sessionId}.html`
 }
 
 // Sections meant for the fresh session, not for a person reading the page.
@@ -155,71 +148,22 @@ export function renderPage(entry: Entry, chain: readonly Entry[]): string {
 `
 }
 
-/** Render the viewer page for one brief and write it to pagesDir. Updates all pages in the chain. */
-export async function renderAndWrite($: EngineInterface, briefPath: string, pagesDir: string): Promise<void> {
-  const briefText = await $.fs.read(briefPath)
-  if (typeof briefText !== 'string') throw new Error(`Failed to read brief: ${briefPath}`)
-
-  const { header, body } = parseBrief(briefText)
-  const sessionId = briefPath.match(/\/([^/]+)\.md$/)?.[1]
-  if (!sessionId) throw new Error(`Could not extract session ID from path: ${briefPath}`)
-
-  const chainId = header.chain || sessionId
-
-  // Find all briefs with the same chain ID
-  const briefDir = briefPath.replace(/\/[^/]+$/, '')
-  const entries: { name: string }[] = []
-  try {
-    const allEntries = await $.fs.list(briefDir)
-    entries.push(...allEntries.filter(f => f.name.endsWith('.md') && f.name !== briefPath.match(/\/([^/]+)$/)?.[1]))
-  } catch {}
-
+/** Writes the page of every brief in sessionId's chain, so each page lists the whole chain. */
+export async function writeChainPages($: EngineInterface, briefDir: string, pagesDir: string, sessionId: string): Promise<void> {
+  const own = await $.fs.read(`${briefDir}/${sessionId}.md`)
+  if (typeof own !== 'string') return
+  const chainId = parseBrief(own).header.chain || sessionId
   const chain: Entry[] = []
-  for (const entry of entries) {
-    const path = `${briefDir}/${entry.name}`
+  for (const f of await $.fs.list(briefDir)) {
+    if (f.kind !== 'file' || !f.name.endsWith('.md')) continue
+    const id = f.name.slice(0, -3)
     try {
-      const text = await $.fs.read(path)
+      const text = await $.fs.read(`${briefDir}/${f.name}`)
       if (typeof text !== 'string') continue
-      const { header: h } = parseBrief(text)
-      if (h.chain === chainId || (!h.chain && entry.name === `${chainId}.md`)) {
-        const id = entry.name.replace(/\.md$/, '')
-        chain.push({ id, header: h, body: text.slice(text.indexOf('\n---\n') + 5) })
-      }
+      const { header, body } = parseBrief(text)
+      if ((header.chain || id) === chainId) chain.push({ id, header, body })
     } catch {}
   }
-
-  // Add the current brief if not already in chain
-  if (!chain.find(e => e.id === sessionId)) {
-    chain.push({ id: sessionId, header, body })
-  }
-
-  // Sort by date and build index for link resolution
-  chain.sort((a, b) => {
-    const aTime = a.header.at ? new Date(a.header.at).getTime() : 0
-    const bTime = b.header.at ? new Date(b.header.at).getTime() : 0
-    return aTime - bTime
-  })
-
-  // Write pages for current brief and update chain links
-  const html = renderPage({ id: sessionId, header, body }, chain)
-  await $.fs.write(`${pagesDir}/${sessionId}.html`, html)
-
-  // Also update the "previous" brief to point to this one if we're a "to" link
-  if (header.from) {
-    try {
-      const prevPath = `${briefDir}/${header.from}.md`
-      const prevText = await $.fs.read(prevPath)
-      if (typeof prevText === 'string') {
-        const prev = parseBrief(prevText)
-        if (!prev.header.to) {
-          prev.header.to = sessionId
-          const updated = withHeader(prev.header, prev.body)
-          await $.fs.write(prevPath, updated)
-          // Re-render the previous brief's page with updated chain
-          const prevHtml = renderPage({ id: header.from, header: prev.header, body: prev.body }, chain)
-          await $.fs.write(`${pagesDir}/${header.from}.html`, prevHtml)
-        }
-      }
-    } catch {}
-  }
+  chain.sort((a, b) => (a.header.at ?? '').localeCompare(b.header.at ?? ''))
+  for (const e of chain) await $.fs.write(`${pagesDir}/${e.id}.html`, renderPage(e, chain))
 }
