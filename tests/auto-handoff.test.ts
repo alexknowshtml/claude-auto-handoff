@@ -268,6 +268,17 @@ describe('auto-handoff', () => {
     expect(calls.written[`${dir}/pages/new-session-1.html`]).toContain('href="old-session.html"')
   })
 
+  test('a session seeded before a hot reload keeps its chain: lineage comes from the store', async ($, on) => {
+    // Seen live: the reload wiped the in-memory lineage, and the next brief started a new chain.
+    const dir = '/home/test/.claude/state/auto-handoff'
+    const calls = engine(on, { tokens: 165_000, store: { 'lineage:old-session': { from: 'earlier', chain: 'first' } } })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    const header = parseBrief(calls.written[`${dir}/old-session.md`] ?? '').header
+    expect(header.from).toBe('earlier')
+    expect(header.chain).toBe('first')
+  })
+
   test('an unanswered last request puts a PRIORITY directive in the instructions', async ($, on) => {
     const brief = '## Last Request from the User\n"Make the thresholds vars"\nStatus: Partially answered.\n\n## Next Step\nAdd userConfig.'
     const calls = engine(on, { tokens: 165_000, brief })

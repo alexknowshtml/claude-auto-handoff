@@ -1,6 +1,6 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { assembleBrief, briefPrompt, extractFacts, isValidBrief } from './brief.ts'
-import { parseBrief, renderPage, viewerLink, withHeader } from './viewer.ts'
+import { chainOf, parseBrief, renderPage, viewerLink, withHeader } from './viewer.ts'
 import type { Entry } from './viewer.ts'
 import { SERVER_JS, parseAddress } from './server.ts'
 
@@ -63,8 +63,11 @@ let unattended = 0 // handoffs since the user last typed a prompt
 let pausedSession: string | undefined
 // The handoff the fresh session came from, until its first request is measured and toasted.
 let handedFrom: { session: string; tokens: number; link: string } | undefined
-// The seeded session's place in its chain of handoffs, for its own brief's header.
-let lineage: { from: string; chain: string } | undefined
+// The seeded session's place in its chain of handoffs, for its own brief's header. Also kept in
+// the store as lineage:<session>, because a hot reload resets module variables: a session seeded
+// before a reload would otherwise start a new chain when it hands off.
+type Lineage = { from: string; chain: string }
+let lineage: Lineage | undefined
 // Tokens added since the last response measured the context: tool results and the
 // response's own output. turn.complete alone missed a turn whose reads jumped from 63k
 // straight past the window, because the request that would have measured it failed.
@@ -140,7 +143,6 @@ function ensureServer($: EngineInterface, pagesDir: string, addr: { host: string
   })()
 }
 
-/** Writes the page of every brief in sessionId's chain, so each page lists the whole chain. */
 // Keeps a server up for the session's life. Called on startup and after each turn, so a session
 // whose mod was reloaded, or whose server exited, serves again. At most one try a minute: when
 // another session holds the port, the child here exits at once.
@@ -152,11 +154,11 @@ async function keepServing($: EngineInterface) {
   if (addr && home) ensureServer($, `${home}/${BRIEF_DIR}/pages`, addr)
 }
 
+/** Writes the page of every brief in sessionId's chain, so each page lists the whole chain. */
 async function writeChainPages($: EngineInterface, briefDir: string, pagesDir: string, sessionId: string): Promise<void> {
   const own = await $.fs.read(`${briefDir}/${sessionId}.md`)
   if (typeof own !== 'string') return
-  const chainId = parseBrief(own).header.chain || sessionId
-  const chain: Entry[] = []
+  const all: Entry[] = []
   for (const f of await $.fs.list(briefDir)) {
     if (f.kind !== 'file' || !f.name.endsWith('.md')) continue
     const id = f.name.slice(0, -3)
@@ -164,10 +166,10 @@ async function writeChainPages($: EngineInterface, briefDir: string, pagesDir: s
       const text = await $.fs.read(`${briefDir}/${f.name}`)
       if (typeof text !== 'string') continue
       const { header, body } = parseBrief(text)
-      if ((header.chain || id) === chainId) chain.push({ id, header, body })
+      all.push({ id, header, body })
     } catch {}
   }
-  chain.sort((a, b) => (a.header.at ?? '').localeCompare(b.header.at ?? ''))
+  const chain = chainOf(all, sessionId)
   for (const e of chain) await $.fs.write(`${pagesDir}/${e.id}.html`, renderPage(e, chain))
 }
 
@@ -183,6 +185,15 @@ async function viewer($: EngineInterface, briefDir: string, pagesDir: string, se
   } catch (err) {
     await log($, `viewer error session=${sessionId} ${String(err)}`)
     return ''
+  }
+}
+
+async function storedLineage($: EngineInterface, sessionId: string): Promise<Lineage | undefined> {
+  try {
+    const v = await $.store.get(`lineage:${sessionId}`) as Partial<Lineage> | undefined
+    return typeof v?.from === 'string' && typeof v.chain === 'string' ? { from: v.from, chain: v.chain } : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -213,7 +224,7 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number) {
     const briefDir = `${home}/${BRIEF_DIR}`
     const briefPath = `${briefDir}/${sessionId}.md`
     const pagesDir = `${briefDir}/pages`
-    const own = sessionId === seededSession ? lineage : undefined
+    const own = sessionId === seededSession && lineage ? lineage : await storedLineage($, sessionId)
     const chain = own?.chain ?? sessionId
     const header = { from: own?.from, chain, tokens: String(tokens), at: new Date().toISOString(), cwd }
     await $.fs.write(briefPath, withHeader(header, brief))
@@ -465,6 +476,7 @@ export const register: Register = (on, options) => {
       await log($, `seeding new=${newSession} from=${p.oldSession}`)
       handedFrom = { session: p.oldSession, tokens: p.tokens, link: p.link }
       lineage = { from: p.oldSession, chain: p.chain }
+      await $.store.set(`lineage:${newSession}`, lineage)
       // The old brief learns where it went, and its chain's pages link forward.
       try {
         const old = parseBrief(await $.fs.read(p.briefPath) as string)

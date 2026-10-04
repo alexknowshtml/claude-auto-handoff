@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { parseBrief, renderPage, sections, viewerLink, withHeader } from '../hooks/viewer.ts'
+import { chainOf, parseBrief, renderPage, sections, viewerLink, withHeader } from '../hooks/viewer.ts'
 
 describe('viewer', () => {
   test('parseBrief extracts header and body', () => {
@@ -69,5 +69,19 @@ Also don't read`
     expect(visible.length).toBe(2)
     expect(visible[0]).toContain('Work in Progress')
     expect(visible[1]).toContain('Next Step')
+  })
+
+  test('chainOf joins a run whose chain id broke partway, through from/to links', () => {
+    const e = (id: string, at: string, header: Record<string, string>) => ({ id, header: { at, ...header }, body: '' })
+    const entries = [
+      e('a', '1', { chain: 'a', to: 'b' }),
+      e('b', '2', { chain: 'a', from: 'a', to: 'c' }),
+      e('c', '3', { chain: 'c', to: 'd' }), // the reload lost its from
+      e('d', '4', { chain: 'c', from: 'c' }),
+      e('x', '5', { chain: 'x' }),
+    ]
+    expect(chainOf(entries, 'd').map(x => x.id)).toEqual(['a', 'b', 'c', 'd'])
+    expect(chainOf(entries, 'a').map(x => x.id)).toEqual(['a', 'b', 'c', 'd'])
+    expect(chainOf(entries, 'x').map(x => x.id)).toEqual(['x'])
   })
 })

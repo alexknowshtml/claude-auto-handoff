@@ -1,6 +1,6 @@
 // The handoff viewer: one self-contained HTML page per brief, written to a pages/ folder beside
 // the briefs. Each brief starts with a small header (from, to, chain, tokens, at, cwd); briefs that
-// share a chain id are one run of handoffs, and every page in a chain lists all of them.
+// share a chain id or a from/to link are one run of handoffs, and every page in a run lists all of them.
 // The page renders the brief's markdown in the browser from a CDN, so the mod ships no packages.
 
 export type Header = { from?: string; to?: string; chain?: string; tokens?: string; at?: string; cwd?: string; viewer?: string }
@@ -23,6 +23,26 @@ export function parseBrief(text: string): { header: Header; body: string } {
 export function withHeader(header: Header, body: string): string {
   const lines = HEADER_KEYS.filter(k => header[k] !== undefined).map(k => `${k}: ${header[k]}`)
   return `---\n${lines.join('\n')}\n---\n${body}`
+}
+
+/** Every brief linked to id, oldest first. Briefs join through a shared chain id or a from/to
+ * link, so a run whose chain id broke partway (a hot reload once dropped it) still reads as one. */
+export function chainOf(entries: readonly Entry[], id: string): Entry[] {
+  const parent = new Map<string, string>()
+  const find = (x: string): string => {
+    let r = x
+    while (parent.has(r) && parent.get(r) !== r) r = parent.get(r)!
+    parent.set(x, r)
+    return r
+  }
+  const join = (a: string, b: string) => { const ra = find(a), rb = find(b); if (ra !== rb) parent.set(ra, rb) }
+  for (const e of entries) {
+    join(e.id, `chain:${e.header.chain || e.id}`)
+    if (e.header.from) join(e.id, e.header.from)
+    if (e.header.to) join(e.id, e.header.to)
+  }
+  const root = find(id)
+  return entries.filter(e => find(e.id) === root).sort((a, b) => (a.header.at ?? '').localeCompare(b.header.at ?? ''))
 }
 
 /** The page's address: served when the mod runs a server, else the local file. */
