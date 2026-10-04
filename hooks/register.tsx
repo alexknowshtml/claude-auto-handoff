@@ -1,5 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { assembleBrief, briefPrompt, extractFacts, isValidBrief } from './brief.ts'
+import { parseBrief, renderAndWrite, viewerLink, withHeader } from './viewer.ts'
+import { startServer } from './server.ts'
 
 // At the token threshold, Haiku writes a handoff brief, the mod runs /clear, then seeds the
 // fresh session with a pointer to the brief. Interactive terminal sessions only: where a
@@ -116,7 +118,35 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number) {
       instructions: await template($, 'instructionsTemplate') || LAST_RESORT_INSTRUCTIONS,
     }, facts, problem ? undefined : text)
     const briefPath = `${home}/${BRIEF_DIR}/${sessionId}.md`
-    await $.fs.write(briefPath, brief)
+    const pagesDir = `${home}/${BRIEF_DIR}/pages`
+    try {
+      await $.fs.list(pagesDir)
+    } catch {
+      await $.fs.write(`${pagesDir}/.gitkeep`, '')
+    }
+
+    // Add viewer infrastructure to the brief
+    let finalBrief = brief
+    try {
+      const { header, body } = parseBrief(brief)
+      header.chain = header.chain || sessionId
+      const serve = await startServer($, pagesDir)
+      header.viewer = viewerLink('', serve, pagesDir, sessionId)
+      finalBrief = withHeader(header, body)
+    } catch (err) {
+      await log($, `viewer setup error ${String(err)}`)
+    }
+
+    await $.fs.write(briefPath, finalBrief)
+
+    // Render the viewer page
+    try {
+      await renderAndWrite($, briefPath, pagesDir)
+      await log($, `viewer written ${pagesDir}/${sessionId}.html`)
+    } catch (err) {
+      await log($, `viewer write error ${String(err)}`)
+    }
+
     pending = { oldSession: sessionId, briefPath, tokens }
     await $.store.set(`fired:${sessionId}`, problem ? `clearing-facts-only:${problem}` : 'clearing')
     await log($, `brief written ${briefPath} (${brief.length} chars); queueing /clear`)
