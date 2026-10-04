@@ -103,9 +103,9 @@ function engine(on: On, opts: { tokens: number; files?: Record<string, string>; 
     }
   })
   on('process.run', async (_$, e) => {
-    // The log's `sh` append: kept in the file store, or refused as on a Windows without `sh`.
+    // No `sh`, as on Windows: every sh call refused. The log's `sh` append is kept in the file store.
+    if (opts.noSh && e.argv[0] === 'sh') throw new Error('ENOENT sh')
     if (e.argv[0] === 'sh' && e.argv[2]?.includes('>> "$2"')) {
-      if (opts.noSh) throw new Error('ENOENT sh')
       const path = posix(e.argv[5] ?? '')
       calls.written[path] = `${calls.written[path] ?? ''}${e.argv[4]}\n`
     }
@@ -259,6 +259,17 @@ describe('auto-handoff', () => {
     const brief = calls.written['/home/test/.claude/state/auto-handoff/old-session.md']
     expect(brief).not.toContain('Sure, I can help')
     expect(brief).toContain('## Last Real User Message (verbatim)\nplease refactor the parser')
+  })
+
+  test('without sh the server cannot launch, and the link is the local file', async ($, on) => {
+    const calls = engine(on, { tokens: 165_000, noSh: true })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    expect(calls.written['/home/test/.claude/state/auto-handoff/pages/old-session.html']).toBeDefined()
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    expect(calls.seeded[0]).toContain('file:///home/test/.claude/state/auto-handoff/pages/old-session.html')
+    expect(calls.seeded[0]).not.toContain('http://')
   })
 
   test('a blank viewer setting means no server, and the link is the local file', { options: { viewer: '' } }, async ($, on) => {

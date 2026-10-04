@@ -125,15 +125,19 @@ let lastServeTry = 0
 // Starts the server detached (setsid, else nohup), so the pages stay served after this session
 // exits: a brief's link is opened later, often from a phone, long after the handoff. When a
 // server already holds the port, the new child exits at once, so a launch is safe to repeat.
-// Its output goes to the mod's log.
-async function launchServer($: EngineInterface, pagesDir: string, addr: { host: string; port: string }) {
+// Its output goes to the mod's log. Answers whether the launch ran: it needs `sh`, which Windows
+// lacks, and then the link falls back to the local file.
+async function launchServer($: EngineInterface, pagesDir: string, addr: { host: string; port: string }): Promise<boolean> {
   try {
     const home = await homeDir($)
-    await $.process.run(['sh', '-c', 'mkdir -p "$1"; if command -v setsid >/dev/null 2>&1; then d=setsid; else d=nohup; fi; $d node -e "$2" "$1" "$3" "$4" >>"$5" 2>&1 </dev/null &',
+    const { exitCode } = await $.process.run(['sh', '-c', 'mkdir -p "$1"; if command -v setsid >/dev/null 2>&1; then d=setsid; else d=nohup; fi; $d node -e "$2" "$1" "$3" "$4" >>"$5" 2>&1 </dev/null &',
       'sh', pagesDir, SERVER_JS, addr.host, addr.port, `${home}/${BRIEF_DIR}/auto-handoff.log`])
+    if (exitCode === 0) return true
+    await log($, `viewer server failed exit=${exitCode}`)
   } catch (err) {
     await log($, `viewer server failed ${String(err)}`)
   }
+  return false
 }
 
 // Brings the server back if it died (a reboot, a crash). Called on startup and after each turn,
@@ -170,11 +174,11 @@ async function writeChainPages($: EngineInterface, briefDir: string, pagesDir: s
 // link, or '' when the pages could not be written. Never throws: the viewer is not the handoff.
 async function viewer($: EngineInterface, briefDir: string, pagesDir: string, sessionId: string): Promise<string> {
   try {
-    await $.process.run(['mkdir', '-p', pagesDir])
+    // $.fs.write creates pagesDir, so no `mkdir`: a subprocess Windows can't run.
     await writeChainPages($, briefDir, pagesDir, sessionId)
     const addr = await serveAddress($)
-    if (addr) await launchServer($, pagesDir, addr)
-    return viewerLink(addr, pagesDir, sessionId)
+    const served = addr && await launchServer($, pagesDir, addr)
+    return viewerLink(served ? addr : undefined, pagesDir, sessionId)
   } catch (err) {
     await log($, `viewer error session=${sessionId} ${String(err)}`)
     return ''
