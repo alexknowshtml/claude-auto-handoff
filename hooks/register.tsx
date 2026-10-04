@@ -112,6 +112,7 @@ async function serveAddress($: EngineInterface): Promise<{ host: string; port: s
 }
 
 let serving = false
+let lastServeTry = 0
 // Starts the server unless this module already runs one. The spawn loop is the child's life: it
 // runs on after the caller returns and ends with the child or the module. A second session finds
 // the port taken, its child exits, and the first session's server keeps serving the same folder.
@@ -130,6 +131,17 @@ function ensureServer($: EngineInterface, pagesDir: string, addr: { host: string
 }
 
 /** Writes the page of every brief in sessionId's chain, so each page lists the whole chain. */
+// Keeps a server up for the session's life. Called on startup and after each turn, so a session
+// whose mod was reloaded, or whose server exited, serves again. At most one try a minute: when
+// another session holds the port, the child here exits at once.
+async function keepServing($: EngineInterface) {
+  if (serving || Date.now() - lastServeTry < 60_000 || await $.env.get('AUTO_HANDOFF_DISABLE')) return
+  lastServeTry = Date.now()
+  const addr = await serveAddress($)
+  const home = await $.env.get('HOME')
+  if (addr && home) ensureServer($, `${home}/${BRIEF_DIR}/pages`, addr)
+}
+
 async function writeChainPages($: EngineInterface, briefDir: string, pagesDir: string, sessionId: string): Promise<void> {
   const own = await $.fs.read(`${briefDir}/${sessionId}.md`)
   if (typeof own !== 'string') return
@@ -299,6 +311,7 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     try {
+      if (!e.agentId) await keepServing($)
       if (e.agentId || inFlight || pending) return r // subagent turns fire turn.complete too
       const tokens = (await $.session.usage()).context.tokens
       if (tokens === undefined) return r
@@ -417,13 +430,7 @@ export const register: Register = (on, options) => {
     if (e.transcript_path) transcriptPath = e.transcript_path
     if (e.source === 'startup') {
       await writeMissingTemplates($)
-      // Serve the existing pages from the start, so an old link works once a session is open.
-      // Not in a pane the mod never hands off from.
-      if (!await paneVar($)) {
-        const addr = await serveAddress($)
-        const home = await $.env.get('HOME')
-        if (addr && home) ensureServer($, `${home}/${BRIEF_DIR}/pages`, addr)
-      }
+      await keepServing($)
     }
     if (e.source !== 'clear' || !pending) return r
     const p = pending
