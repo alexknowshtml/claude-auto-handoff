@@ -285,6 +285,8 @@ describe('auto-handoff', () => {
     const first = parseBrief(calls.written[`${dir}/old-session.md`] ?? '').header
     expect(first.chain).toBe('old-session')
     expect(first.tokens).toBe('165000')
+    expect(first.depth).toBe('1')
+    expect(calls.prompts[0]).toContain('**Handoff depth:** 1')
     expect(calls.written[`${dir}/pages/old-session.html`]).toContain('Session Context')
     await $.classic.SessionStart({ source: 'clear' })
     await settle(() => calls.seeded.length > 0)
@@ -301,6 +303,8 @@ describe('auto-handoff', () => {
     const second = parseBrief(calls.written[`${dir}/new-session-1.md`] ?? '').header
     expect(second.chain).toBe('old-session')
     expect(second.from).toBe('old-session')
+    expect(second.depth).toBe('2')
+    expect(calls.prompts[1]).toContain('**Handoff depth:** 2')
     expect(calls.written[`${dir}/pages/new-session-1.html`]).toContain('href="old-session.html"')
   })
 
@@ -313,6 +317,18 @@ describe('auto-handoff', () => {
     const header = parseBrief(calls.written[`${dir}/old-session.md`] ?? '').header
     expect(header.from).toBe('earlier')
     expect(header.chain).toBe('first')
+    // Seeded before depth was recorded: unknown beats a wrong guess.
+    expect(header.depth).toBeUndefined()
+    expect(calls.prompts[0]).not.toContain('Handoff depth')
+  })
+
+  test('depth carries through the store across a hot reload', async ($, on) => {
+    const dir = '/home/test/.claude/state/auto-handoff'
+    const calls = engine(on, { tokens: 165_000, store: { 'lineage:old-session': { from: 'earlier', chain: 'first', depth: 3 } } })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    expect(parseBrief(calls.written[`${dir}/old-session.md`] ?? '').header.depth).toBe('3')
+    expect(calls.prompts[0]).toContain('**Handoff depth:** 3')
   })
 
   test('an unanswered last request puts a PRIORITY directive in the instructions', async ($, on) => {
