@@ -106,6 +106,7 @@ The mod hot-reloads when you save while it's loaded with `--plugin-dir`.
 
 ## Changelog
 
+- **0.8.3** The brief gets the real numbers: tokens at handoff, the threshold and where it came from, the session's starting size, and how many handoffs ran with no message from you. Haiku must copy them or write "unknown", so a brief can no longer invent a figure like "burned its 200k budget".
 - **0.8.2** A refused tool call always ends in a handoff, even when the real size measures under the threshold. Your own `/clear` closes the panel. A second session that finds the viewer port taken exits quietly instead of logging a stack trace.
 - **0.8.1** On the mobile app and in VS Code, which don't draw the panel, the threshold, the result and anything that stays up also arrive as toasts.
 - **0.8.0** A panel above the prompt replaces the toasts, with a spinner on each step and an `open brief` link.
