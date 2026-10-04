@@ -4,6 +4,10 @@ A Claude Code mod that hands a long session off to a fresh one before the contex
 
 At the threshold, Haiku writes a structured handoff brief to disk. Then the mod runs `/clear` and seeds the new session with one line that points at the brief. The fresh session reads the brief and keeps working.
 
+![auto-handoff in a live session: the tool gate stops a read at the threshold, the panel walks through the brief and /clear, and the fresh session picks the work back up](docs/demo.gif)
+
+A live run on Haiku with the threshold at 80k. The mod refuses a read at the threshold, writes the brief, clears, and the fresh session is back at work about 7 seconds later at 31k. ([video](docs/demo.mp4))
+
 ## Why not auto-compact?
 
 Auto-compact summarizes in place, and you can't control what it keeps. A handoff brief has a fixed structure that you can edit. It covers work in progress, decisions, assumptions to verify, dead ends, your last request and whether it was answered, and the next step. The files, commits and issues sections come from the transcript in code, so they don't depend on the model's memory.
