@@ -38,6 +38,30 @@ export type Facts = {
   depth?: number
   /** What started the handoff: the threshold, the handoff tool, or /handoff. */
   trigger?: string
+  /** `git status --porcelain` lines of the session's repo; undefined when git was not asked. */
+  uncommitted?: string[]
+}
+
+const commitSha = (c: string) => c.match(/\(([0-9a-f]{7,})\)$/)?.[1]?.slice(0, 7)
+
+/** Merges what git says into the transcript's facts. The transcript only sees Edit/Write calls and
+ * git's "[branch sha]" line, so a file edited through Bash, or a `git commit -q`, never reached the
+ * brief. log: `git log --format=%x00%h %s --name-only` since the session (or its segment) began;
+ * status: `git status --porcelain`; root: the repo's top level, for absolute paths. */
+export function mergeGitFacts(facts: Facts, root: string, log: string, status: string): Facts {
+  const files = new Set(facts.filesModified)
+  const fromGit: string[] = []
+  for (const block of log.split('\0').slice(1)) {
+    const [head = '', ...names] = block.split('\n')
+    const m = head.match(/^([0-9a-f]{7,}) (.*)$/)
+    if (m) fromGit.push(`${m[2]} (${m[1]})`)
+    for (const n of names) if (n.trim()) files.add(`${root}/${n.trim()}`)
+  }
+  const known = new Set(fromGit.map(commitSha))
+  // Oldest first, like the transcript's; a transcript commit git did not list (another repo) stays.
+  const commits = [...facts.commits.filter(c => !known.has(commitSha(c))), ...fromGit.reverse()]
+  const uncommitted = status.split('\n').map(l => l.trimEnd()).filter(Boolean)
+  return { ...facts, filesModified: [...files].slice(-30), commits: commits.slice(-15), uncommitted: uncommitted.slice(0, 30) }
 }
 
 /** The user's own words, or undefined for a harness signal or a tool-result-only message. */
@@ -127,12 +151,12 @@ const k = (n: number) => `${Math.round(n / 1000)}k`
 
 export function factsBlock(f: Facts, withLastMessage = true): string {
   const numbers = handoffNumbersBlock(f)
-  const files = `## Files Modified (from Edit/Write calls)
+  const files = `## Files Modified (Edit/Write calls and this session's commits)
 ${list(f.filesModified, 'None.')}
 
 ## Commits This Session
 ${list(f.commits, 'None.')}
-
+${f.uncommitted ? `\n## Uncommitted Changes (git status)\n${list(f.uncommitted, 'None: the tree is clean.')}\n` : ''}
 ## GitHub Issues Mentioned
 ${f.issues.length ? f.issues.join(', ') : 'None.'}`
   const all = [numbers, files].filter(Boolean).join('\n')

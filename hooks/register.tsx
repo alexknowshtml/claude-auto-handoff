@@ -1,5 +1,5 @@
 import type { EngineInterface, Register, SessionMessage, Timer } from 'claude-code'
-import { assembleBrief, briefPrompt, extractFacts, factsBlock, forkPrompt, isValidBrief, markUnverifiedFigures, replySection, softNote } from './brief.ts'
+import { assembleBrief, briefPrompt, extractFacts, factsBlock, forkPrompt, isValidBrief, markUnverifiedFigures, mergeGitFacts, replySection, softNote } from './brief.ts'
 import type { Facts } from './brief.ts'
 import { chainOf, parseBrief, renderPage, sections, viewerLink, withHeader } from './viewer.ts'
 import type { Entry } from './viewer.ts'
@@ -273,6 +273,23 @@ const factsDigest = (f: Facts) => [
   f.filesModified.length && `Files changed: ${f.filesModified.join(', ')}`,
 ].filter(Boolean).join('. ') || 'Handed off with no digest.'
 
+// git's view of the work since `since` (ms): commits and the files in them, and what is uncommitted.
+// Facts left as they were when cwd is not a repo or git fails.
+async function withGitFacts($: EngineInterface, facts: Facts, cwd: string, since: number): Promise<Facts> {
+  try {
+    const top = await $.process.run(['git', '-C', cwd, 'rev-parse', '--show-toplevel'])
+    const root = top.stdout.trim()
+    if (top.exitCode !== 0 || !root) return facts
+    const commits = await $.process.run(['git', '-C', root, 'log', `--since=@${Math.floor(since / 1000)}`, '--format=%x00%h %s', '--name-only'])
+    const status = await $.process.run(['git', '-C', root, 'status', '--porcelain'])
+    if (commits.exitCode !== 0 || status.exitCode !== 0) return facts
+    return mergeGitFacts(facts, root, commits.stdout, status.stdout)
+  } catch (err) {
+    await log($, `git facts error ${String(err)}`)
+    return facts
+  }
+}
+
 // The brief a seeded session started from, as the next brief's prompt reads it: its sections
 // minus the ones written for the model, and minus its history, which the new brief carries anyway.
 async function previousBrief($: EngineInterface, path: string): Promise<string | undefined> {
@@ -319,7 +336,13 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
   try {
     const own = sessionId === seededSession && lineage ? lineage : await storedLineage($, sessionId)
     const messages = await $.session.messages()
-    const facts = extractFacts(messages, cfg.ignoreFiles)
+    const home = await $.env.get('HOME') ?? ''
+    const cwd = await $.session.cwd()
+    const briefDir = `${home}/${BRIEF_DIR}`
+    // Since this session began, or since the handoff that seeded it: a compact handoff keeps the
+    // session, so its start would count the earlier segments' commits too.
+    const seededAt = own?.from ? Date.parse(parseBrief(await readText($, `${briefDir}/${own.from}.md`) ?? '').header.at ?? '') : NaN
+    const facts = await withGitFacts($, extractFacts(messages, cfg.ignoreFiles), cwd, Number.isFinite(seededAt) ? seededAt : (await $.session.usage()).startedAt)
     const { base, source } = await configured($)
     facts.handoffTokens = tokens
     facts.threshold = threshold
@@ -330,9 +353,6 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     // A session with no lineage starts its chain. One seeded before depth existed stays unknown.
     const depth = own ? own.depth : 1
     if (depth !== undefined) facts.depth = depth
-    const home = await $.env.get('HOME') ?? ''
-    const cwd = await $.session.cwd()
-    const briefDir = `${home}/${BRIEF_DIR}`
     const previous = own?.from ? await previousBrief($, `${briefDir}/${own.from}.md`) : undefined
     const history = await projectHistory($, home, cwd)
     const briefTemplate = await template($, 'briefTemplate')

@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 import type { On, SessionMessage } from 'claude-code'
-import { briefPrompt, extractFacts, factsBlock, hasUnansweredLastRequest, isValidBrief, markUnverifiedFigures } from '../hooks/brief.ts'
+import { briefPrompt, extractFacts, factsBlock, hasUnansweredLastRequest, isValidBrief, markUnverifiedFigures, mergeGitFacts } from '../hooks/brief.ts'
 import { renderTemplate } from '../hooks/templates.ts'
 import { parseBrief } from '../hooks/viewer.ts'
 import { parseLog } from '../hooks/history.ts'
@@ -51,7 +51,7 @@ const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, c
 declare const setTimeout: (fn: (...args: never[]) => void, ms: number) => unknown
 
 // The engine beneath the plugin: everything the mod calls, answered from memory.
-function engine(on: On, opts: { tokens: number; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[]; window?: number; fork?: string | null | Error; answer?: string; callsHandoff?: boolean }): Calls {
+function engine(on: On, opts: { tokens: number; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[]; window?: number; fork?: string | null | Error; answer?: string; callsHandoff?: boolean; git?: { log: string; status: string } }): Calls {
   const calls: Calls = { compacts: 0, compactRuns: [], steps: 0, cleared: 0, seeded: [], written: {}, completes: 0, tokens: opts.tokens, prompts: [], toasts: [], ran: 0, history: [], forks: [] }
   let sessionId = 'old-session'
   let clears = 0
@@ -108,7 +108,12 @@ function engine(on: On, opts: { tokens: number; files?: Record<string, string>; 
     value: Object.keys(calls.written).filter(p => p.startsWith(`${e.path}/`) && !p.slice(e.path.length + 1).includes('/'))
       .map(p => ({ name: p.slice(e.path.length + 1), kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false })),
   }))
-  on('process.run', async () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  // git: the session's repo at /home/test/proj, answered by subcommand; otherwise every process prints nothing.
+  on('process.run', async (_$, e) => {
+    const sub = e.argv[0] === 'git' ? e.argv[3] : undefined
+    const stdout = !opts.git || !sub ? '' : sub === 'rev-parse' ? '/home/test/proj\n' : sub === 'log' ? opts.git.log : sub === 'status' ? opts.git.status : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('ui.toast', async (_$, e) => {
     calls.toasts.push(e.text)
     return { value: undefined }
@@ -239,6 +244,16 @@ describe('auto-handoff', () => {
     await $.turn.complete({ ...TURN, agentId: 'sub-1' })
     await settle(() => false)
     expect(calls.completes).toBe(0)
+  })
+
+  test('the brief lists commits and files git saw, though the transcript showed neither', async ($, on) => {
+    const calls = engine(on, { tokens: 230_000, brief: null, git: { log: '\0d358936 feat: quiet commit\nhooks/register.tsx\n', status: '?? scratch.sh\n' } })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    const brief = calls.written['/home/test/.claude/state/auto-handoff/old-session.md']
+    expect(brief).toContain('- feat: quiet commit (d358936)')
+    expect(brief).toContain('- /home/test/proj/hooks/register.tsx')
+    expect(brief).toContain('- ?? scratch.sh')
   })
 
   test('a failed Haiku brief falls back to the facts and still hands off', async ($, on) => {
@@ -907,6 +922,23 @@ describe('extractFacts', () => {
   test('issue numbers come from the user and the assistant, not from tool noise', async () => {
     const f = extractFacts([msg('user', 'work #846'), msg('assistant', 'see #761 and color #fff', [bash('echo "#9999"')])])
     expect(f.issues).toEqual(['#846', '#761'])
+  })
+
+  test('git adds what the transcript misses: Bash edits, a quiet commit, the uncommitted tree', async () => {
+    const transcript = extractFacts([msg('assistant', 'done', [edit('/repo/a.ts'), bash('cd /other && git commit -m "elsewhere"', '[main 1111111] elsewhere')])])
+    const log = '\0abc1234 second\nhooks/b.ts\n\n\0def5678 first\nhooks/a.ts\nREADME.md\n'
+    const f = mergeGitFacts(transcript, '/repo', log, ' M hooks/c.ts\n?? run.sh\n')
+    expect(f.filesModified).toEqual(['/repo/a.ts', '/repo/hooks/b.ts', '/repo/hooks/a.ts', '/repo/README.md'])
+    // Oldest first; a commit git did not list (another repo) is kept.
+    expect(f.commits).toEqual(['elsewhere (1111111)', 'first (def5678)', 'second (abc1234)'])
+    expect(f.uncommitted).toEqual([' M hooks/c.ts', '?? run.sh'])
+    const block = factsBlock(f)
+    expect(block).toContain('## Uncommitted Changes (git status)\n-  M hooks/c.ts')
+    // A commit both saw is listed once.
+    expect(mergeGitFacts(extractFacts([msg('assistant', '', [bash('git commit -m x', '[main def5678] first')])]), '/repo', log, '').commits).toEqual(['first (def5678)', 'second (abc1234)'])
+    expect(factsBlock(mergeGitFacts(transcript, '/repo', '', ''))).toContain('None: the tree is clean.')
+    // No repo: no git section at all.
+    expect(factsBlock(transcript)).not.toContain('Uncommitted')
   })
 
   test('brief validation needs at least one expected section', async () => {
