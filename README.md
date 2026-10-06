@@ -23,7 +23,7 @@ Auto-compact summarizes in place, and you can't control what it keeps. A handoff
 
 ## What happens
 
-1. **Threshold.** The mod checks the context size after each turn and before each model request, including tool output that hasn't been measured yet. Once it's past the threshold, the mod refuses new tool calls, so one burst of reads can't overflow the window. Unmeasured tool output is an estimate that can run high, so the real size sometimes comes in under the threshold. A refused call still ends in a handoff, at the next request or the end of the turn.
+1. **Threshold.** The mod checks the context size after each turn and before each model request, including tool output that hasn't been measured yet. Past the threshold, the handoff waits for the turn to end, so a turn always finishes its tools and its reply. Only a backstop cuts a turn: the context window less 40k, at most 100k past the threshold, or the threshold when the window is unknown. There the mod refuses new tool calls, so one burst of reads can't overflow the window, and the handoff runs at the next request.
 2. **Brief.** The model's own, passed to the `handoff` tool after the soft-line note. Without one, a fork of the session's own model writes it over its cached transcript; if the fork fails, Haiku writes it from the last 120 messages; if Haiku fails, a facts-only brief stands in. Briefs go to `~/.claude/state/auto-handoff/<session-id>.md`.
 3. **Clear and seed.** The mod runs `/clear` and sends the fresh session one line: read the brief and follow its Instructions section. In the transcript, that line's brief path and viewer URL are drawn as links. Claude Code makes them clickable only when it detects a terminal that supports links. Over plain SSH it usually doesn't, so set `FORCE_HYPERLINK=1` if your terminal handles links, or use the status line link below.
 4. **A panel above the prompt.** It shows each step with a braille spinner on the one still running: writing the brief, clearing, starting the fresh session. Once the new session is measured it reads `✓ handed off · 162k → 45k` with an `open brief` link, then collapses after 10 seconds. Failures, the loop-guard pause, a facts-only brief and a too-tight threshold stay up until you press Dismiss. Typing `/clear` yourself closes the panel, including one waiting for Dismiss, unless a handoff is running. The panel steps aside while a survey holds that band. The band is drawn on the terminal and desktop only, so on the mobile app or in VS Code the threshold, the result, and anything that stays up also arrive as a toast.
@@ -59,13 +59,13 @@ Every setting is a row in `/config` under auto-handoff. They're stored in `~/.cl
 
 | Setting | Default | What it does |
 |---|---|---|
-| `threshold` | `220000` | Context tokens that trigger a handoff; the soft line sits 20k below it. Never closer than 40k to the context window, so a 300k setting becomes 160k on a 200k window. A seeded session hands off no sooner than 40k past its own starting size, whatever this says; set it lower than that and the panel tells you where the line actually is |
+| `threshold` | `220000` | Context tokens that trigger a handoff. Handoffs usually come at the soft line, 20k below it, where the model is asked to hand off. Never closer than 40k to the context window, so a 300k setting becomes 160k on a 200k window. A seeded session hands off no sooner than 40k past its own starting size, whatever this says; set it lower than that and the panel tells you where the line actually is |
 | `maxConsecutiveHandoffs` | `2` | Handoffs allowed before you type a prompt; past this, the mod pauses until you do |
 | `briefTemplate` | `~/.claude/auto-handoff/brief.md` | Your copy of the sections Haiku writes |
 | `instructionsTemplate` | `~/.claude/auto-handoff/instructions.md` | Your copy of what the fresh session is told to do |
 | `ignoreFiles` | blank | Regex for edited files to leave out of the brief, such as caches or synced state |
 | `viewer` | blank | Where to serve the brief pages, as `host:port`, such as `tailscale:3846`. `tailscale` as the host means this machine's Tailscale IP, or `127.0.0.1` when Tailscale isn't set up. Blank: no server; the link is the local file |
-| `historyLines` | `24` | Lines of project history each brief carries, at most about 150 tokens each |
+| `historyLines` | `8` | Lines of project history each brief carries, at most about 150 tokens each; the full log stays on disk |
 | `briefWriter` | `fork` | Who writes the brief when the model did not pass one to `handoff`. `fork`: the session's own model over its cached transcript (one extra request: cache reads plus its output). `haiku`: Haiku from the last 120 messages (cheaper, less complete) |
 
 Environment variables:

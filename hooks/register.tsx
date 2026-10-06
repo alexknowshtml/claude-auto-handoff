@@ -6,7 +6,7 @@ import type { Entry } from './viewer.ts'
 import { SERVER_JS, parseAddress } from './server.ts'
 import { isSpinning, panelTree } from './panel.tsx'
 import type { Line, Panel } from './panel.tsx'
-import { BRIEF_DIR, DEFAULTS, LAST_RESORT_INSTRUCTIONS, MIN_HEADROOM, SEED_PREFIX, TEMPLATES, WINDOW_RESERVE, expand, k, linkify, parseConfig, parseTokens, short, SOFT_MARGIN } from './config.ts'
+import { BRIEF_DIR, DEFAULTS, LAST_RESORT_INSTRUCTIONS, MIN_HEADROOM, SEED_PREFIX, TEMPLATES, WINDOW_RESERVE, BACKSTOP_OVER, expand, k, linkify, parseConfig, parseTokens, short, SOFT_MARGIN } from './config.ts'
 import type { Config, TemplateKey } from './config.ts'
 import { HISTORY_HEADING, blockId, compressPrompt, digestPrompt, halfText, historySection, oneParagraph, parseLog, parseTree, pending as pendingBlocks, projectKey, repoRoot } from './history.ts'
 import type { Entry as HistoryEntry } from './history.ts'
@@ -526,12 +526,12 @@ async function thresholdFor($: EngineInterface, sessionId: string): Promise<numb
 }
 
 // The threshold hands off when the turn ends, so a long turn can finish its answer. Mid-turn,
-// only this backstop stops it: the window less WINDOW_RESERVE, or the threshold when the
-// window is unknown.
+// only this backstop stops it: the window less WINDOW_RESERVE, no more than BACKSTOP_OVER past the
+// threshold, or the threshold when the window is unknown.
 async function backstopFor($: EngineInterface, sessionId: string): Promise<number> {
   const threshold = await thresholdFor($, sessionId)
   const window = (await $.session.usage()).context.window
-  return typeof window === 'number' && window > WINDOW_RESERVE * 2 ? Math.max(threshold, window - WINDOW_RESERVE) : threshold
+  return typeof window === 'number' && window > WINDOW_RESERVE * 2 ? Math.max(threshold, Math.min(window - WINDOW_RESERVE, threshold + BACKSTOP_OVER)) : threshold
 }
 
 // Past the soft line the model is asked to hand off at its next boundary. Never below the point a

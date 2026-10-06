@@ -24,13 +24,14 @@ export const BRIEF_DIR = '.claude/state/auto-handoff'
 // viewer: where the mod serves the brief pages, "host:port"; "tailscale" as the host means this
 // machine's Tailscale IP, or 127.0.0.1 without Tailscale. Blank, the default: no server, and the
 // link is the local file.
-// historyLines: how many lines of project history a brief carries (history.ts).
+// historyLines: how many lines of project history a brief carries (history.ts). 8: at 24 the
+// section was 15.5k of a 26k brief, re-read at every restart; the full log stays a grep away.
 // briefWriter: "fork", the default, has the session's own model write the brief over its cached
 // transcript, so it sees the whole session; "haiku" has Haiku write it from the last 120 messages.
 // A fork that fails falls back to Haiku.
 export type BriefWriter = 'fork' | 'haiku'
 export type Config = { threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp; viewer: string; historyLines: number; briefWriter: BriefWriter }
-export const DEFAULTS: Config = { threshold: 220_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: '', historyLines: 24, briefWriter: 'fork' }
+export const DEFAULTS: Config = { threshold: 220_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: '', historyLines: 8, briefWriter: 'fork' }
 export const MIN_HEADROOM = 40_000
 // The soft line sits this far below the threshold. Past it, the next tool result tells the model
 // to finish its step and call the handoff tool with the brief as its argument: the brief is then
@@ -40,6 +41,9 @@ export const SOFT_MARGIN = 20_000
 // The threshold never sits closer than this to the context window: the turn in flight needs the
 // room. A 300k threshold becomes 160k on a 200k window; on a 1M window it stays 300k.
 export const WINDOW_RESERVE = 40_000
+// The mid-turn backstop sits at most this far past the threshold: a turn may finish past the
+// threshold, but on a 1M window the window alone would let one turn run to 960k.
+export const BACKSTOP_OVER = 100_000
 // The longest one history entry or summary may be, in characters (about 150 tokens).
 export const HISTORY_CHARS = 600
 // Each template's default, a file in the mod's templates/ folder.

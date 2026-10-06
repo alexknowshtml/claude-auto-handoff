@@ -11,8 +11,8 @@
   "userConfig": {
     "threshold": {
       "type": "number",
-      "title": "Handoff threshold (tokens)",
-      "description": "Context size that triggers a handoff. 20k before it, the model is asked to finish its step and hand off with its own brief. The 220k default trades some of the measured saving for more work between handoffs (see config.ts). Never closer than 40k to the context window, so a 300k setting becomes 160k on a 200k window. AUTO_HANDOFF_TOKENS overrides it for a test run, and /handoff 60k for one session. A seeded session hands off no sooner than 40k past its starting size; the panel above the prompt says so when this is set lower.",
+      "title": "Handoff threshold (tokens); handoffs come from 20k below it",
+      "description": "Context size that triggers a handoff. In practice handoffs happen about 20k below it: there the model is asked to finish its step and hand off with its own brief. The 220k default trades some of the measured saving for more work between handoffs (see config.ts). Never closer than 40k to the context window, so a 300k setting becomes 160k on a 200k window. AUTO_HANDOFF_TOKENS overrides it for a test run, and /handoff 60k for one session. A seeded session hands off no sooner than 40k past its starting size; the panel above the prompt says so when this is set lower.",
       "default": 220000
     },
     "maxConsecutiveHandoffs": {
@@ -48,8 +48,8 @@
     "historyLines": {
       "type": "number",
       "title": "Project history lines",
-      "description": "How many lines of project history a brief carries: recent sessions whole, older ones merged. About 150 tokens a line at most.",
-      "default": 24
+      "description": "How many lines of project history a brief carries: recent sessions whole, older ones merged. About 150 tokens a line at most; the full log stays on disk for the next session to grep.",
+      "default": 8
     },
     "briefWriter": {
       "type": "string",

@@ -944,6 +944,15 @@ describe('context manager', () => {
     expect(calls.prompts[0]).toContain('**Threshold:** 220000 (220k), from threshold in /config\n')
   })
 
+  test('on a 1M window a turn runs past the threshold until 100k over it, not to the window', async ($, on) => {
+    const calls = engine(on, { tokens: 300_000, window: 1_000_000 })
+    const r = await $.tool.call({ tool: 'Read', file_path: '/a.ts' } as never) as { deny?: string }
+    expect(r.deny).toBeUndefined()
+    calls.tokens = 321_000
+    const refused = await $.tool.call({ tool: 'Read', file_path: '/b.ts' } as never) as { deny?: string }
+    expect(refused.deny).toContain('320k')
+  })
+
   test('on a 200k window a 300k threshold is capped at 160k, and the brief says why', { options: { threshold: 300_000 } }, async ($, on) => {
     const calls = engine(on, { tokens: 165_000 })
     await $.turn.complete(TURN)
