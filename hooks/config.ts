@@ -29,14 +29,14 @@ export const BRIEF_DIR = '.claude/state/auto-handoff'
 // briefWriter: "fork", the default, has the session's own model write the brief over its cached
 // transcript, so it sees the whole session; "haiku" has Haiku write it from the last 120 messages.
 // A fork that fails falls back to Haiku.
-// resetMode: "clear" runs /clear, which starts a new session and takes the earlier messages off the
-// screen; "compact" compacts the conversation down to one line, so the model starts from the brief
-// while the screen keeps every earlier message. Same session id: its later segments are keyed
-// <id>_<n> (segmentId in register.tsx).
+// resetMode: "compact", the default, compacts the conversation down to one line, so the model starts
+// from the brief while the screen keeps every earlier message. Same session id: its later segments
+// are keyed <id>_<n> (segmentId in register.tsx). "clear" runs /clear, which starts a new session
+// and takes the earlier messages off the screen.
 export type BriefWriter = 'fork' | 'haiku'
 export type ResetMode = 'clear' | 'compact'
 export type Config = { threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp; viewer: string; historyLines: number; briefWriter: BriefWriter; resetMode: ResetMode }
-export const DEFAULTS: Config = { threshold: 220_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: '', historyLines: 8, briefWriter: 'fork', resetMode: 'clear' }
+export const DEFAULTS: Config = { threshold: 220_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: '', historyLines: 8, briefWriter: 'fork', resetMode: 'compact' }
 export const MIN_HEADROOM = 40_000
 // The soft line sits this far below the threshold. Past it, the next tool result tells the model
 // to finish its step and call the handoff tool with the brief as its argument: the brief is then
@@ -85,7 +85,7 @@ export function parseConfig(options: Record<string, unknown>): Config {
   viewer: typeof options.viewer === 'string' ? options.viewer.trim() : DEFAULTS.viewer,
   historyLines: Math.floor(num(options.historyLines, DEFAULTS.historyLines)),
   briefWriter: str(options.briefWriter, '').toLowerCase() === 'haiku' ? 'haiku' : DEFAULTS.briefWriter,
-  resetMode: str(options.resetMode, '').toLowerCase() === 'compact' ? 'compact' : DEFAULTS.resetMode,
+  resetMode: str(options.resetMode, '').toLowerCase() === 'clear' ? 'clear' : DEFAULTS.resetMode,
   }
 }
 

@@ -61,7 +61,7 @@
       "type": "string",
       "title": "Reset mode",
       "description": "clear: /clear starts a fresh session, and the earlier messages leave the screen. compact: the conversation is compacted down to one line, so the model starts from the brief while the screen keeps every earlier message.",
-      "default": "clear"
+      "default": "compact"
     }
   }
 }

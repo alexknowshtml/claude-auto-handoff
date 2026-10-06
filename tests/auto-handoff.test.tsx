@@ -1,10 +1,16 @@
-import { describe, expect, mock, test } from 'claude-code/testing'
+import { describe, expect, mock, test as base } from 'claude-code/testing'
 import type { TestBody } from 'claude-code/testing'
 import type { On, SessionMessage } from 'claude-code'
 import { briefPrompt, extractFacts, factsBlock, hasUnansweredLastRequest, isValidBrief, markUnverifiedFigures, mergeGitFacts } from '../hooks/brief.ts'
 import { renderTemplate } from '../hooks/templates.ts'
 import { parseBrief } from '../hooks/viewer.ts'
 import { parseLog } from '../hooks/history.ts'
+
+// Compact is the default reset; the tests written around /clear pin it unless they name a mode.
+type Opts = { options?: Record<string, unknown> }
+const test = (name: string, a: Opts | TestBody, b?: TestBody) => typeof a === 'function'
+  ? base(name, { options: { resetMode: 'clear' } }, a)
+  : base(name, { ...a, options: { resetMode: 'clear', ...a.options } }, b as TestBody)
 
 type Calls = { compacts: number; compactRuns: string[]; steps: number; cleared: number; seeded: string[]; written: Record<string, string>; completes: number; tokens: number; prompts: string[]; toasts: string[]; ran: number; history: string[]; forks: string[] }
 
@@ -661,6 +667,13 @@ describe('auto-handoff', () => {
     expect(second.chain).toBe('old-session')
     expect(second.depth).toBe('2')
     expect(second.to).toBe('old-session_2')
+    expect(calls.cleared).toBe(0)
+  })
+
+  base('compact is the default reset', async ($, on) => {
+    const calls = engine(on, { tokens: 230_000 })
+    await $.turn.complete(TURN)
+    await settle(() => calls.compactRuns.length > 0)
     expect(calls.cleared).toBe(0)
   })
 
