@@ -3,13 +3,12 @@
 
 export const BRIEF_DIR = '.claude/state/auto-handoff'
 // The two numbers are userConfig fields (plugin.json), set in /config. Defaults match the manifest.
-// threshold: 150k, from 13,574 requests across 272 sessions on this machine (2026-10-04). Every
-// request re-reads its whole context from cache, so a lower line costs less per unit of work until
-// the fixed cost of a handoff (fresh prefix writes, the brief, re-reads) takes over. Measured: 1.8k
-// tokens of growth per request, a seeded session productive from ~74k after ~29k of fresh writes,
-// ~1.3k tokens of re-reads after a handoff, and no latency growth with context. Lowest token cost
-// at 125k, lowest cost plus wall time at 140k; 300k costs about 35% more per unit of work. With
-// SOFT_MARGIN the model hands off between 130k and 150k, around that optimum.
+// threshold: 220k, from the scripts/threshold/ sweep over 14,580 requests on this machine
+// (2026-10-05). Every request re-reads its whole context from cache, so a lower line costs less per
+// unit of work until the fixed cost of a handoff (fresh prefix writes, the brief, re-reads) takes
+// over. Saving against no handoffs: about 26% at 131k, 21% at 175k, 17% at 200k, 9% at 250k. The
+// cheapest line left too little work between handoffs: about 55k at 131k, against about 124k at
+// 200k. With SOFT_MARGIN the model is asked to hand off from about 200k.
 // MIN_HEADROOM and maxUnattended are loop guards. A seeded session must grow MIN_HEADROOM past its
 // first-turn size (its floor) before it can hand off again, and at most maxUnattended handoffs may
 // run before the user types a prompt. MIN_HEADROOM is fixed: seeded sessions start near 45k, so at
@@ -31,7 +30,7 @@ export const BRIEF_DIR = '.claude/state/auto-handoff'
 // A fork that fails falls back to Haiku.
 export type BriefWriter = 'fork' | 'haiku'
 export type Config = { threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp; viewer: string; historyLines: number; briefWriter: BriefWriter }
-export const DEFAULTS: Config = { threshold: 150_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: '', historyLines: 24, briefWriter: 'fork' }
+export const DEFAULTS: Config = { threshold: 220_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: '', historyLines: 24, briefWriter: 'fork' }
 export const MIN_HEADROOM = 40_000
 // The soft line sits this far below the threshold. Past it, the next tool result tells the model
 // to finish its step and call the handoff tool with the brief as its argument: the brief is then

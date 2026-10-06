@@ -7,11 +7,11 @@ A Claude Code mod that hands a long session off to a fresh one before the contex
 This fork (branch `context-manager`, from upstream `079b2a0`) adds:
 
 - **The brief from the working model, at no extra request.** Past a soft line 20k below the threshold, the next tool result tells the model to finish its step and call `handoff` with the brief as its argument. The brief is written inside a request the session was making anyway, by the model that did the work, at a boundary it picks; the mod then ends the turn without the sign-off request. If the model never calls it, a fork of the model writes the brief at the threshold over its cached transcript (one extra request); Haiku is the last resort.
-- **A measured threshold.** 150k, from 13,574 requests across 272 sessions: lowest token cost plus wall time at 140k, and the soft line lands handoffs between 130k and 150k. 300k cost about 35% more per unit of work. `scripts/threshold/` re-runs the analysis on your own transcripts.
+- **A measured threshold.** 220k, from a sweep over 14,580 requests: about 17% cheaper than no handoffs at 200k (26% at 131k), with about 124k of work between handoffs instead of 55k. The soft line asks for the handoff from about 200k. `scripts/threshold/` re-runs the analysis on your own transcripts.
 - **The previous brief and tool output reach Haiku.** Each brief is written from the brief the session started from, read from disk, plus every tool call with what it returned. A chain of handoffs no longer loses what the earlier briefs held.
 - **Project history, at a fixed budget.** Each handoff appends a short digest to its project's log. Pairs of entries compress into summaries, pairs of those into one, and so on (the idea from [OptMem](https://github.com/VictorTaelin/OptMem)). Every brief ends with a `## Project History` section of at most 24 lines, recent sessions whole and older ones merged. Haiku does the compressing in the background, so no session waits for it.
 - **Handing off on request.** `/handoff` hands off now; `/handoff 60k` sets this session's threshold. The model can call the `handoff` tool at the end of a phase of work.
-- **Defaults:** the threshold is 150k, never closer than 40k to the context window; the viewer server is off; the brief no longer tells the next session to start a subagent.
+- **Defaults:** the threshold is 220k, never closer than 40k to the context window; the viewer server is off; the brief no longer tells the next session to start a subagent.
 
 ![auto-handoff in a live session: the tool gate stops a read at the threshold, the panel walks through the brief and /clear, and the fresh session picks the work back up](docs/demo.gif)
 
@@ -59,7 +59,7 @@ Every setting is a row in `/config` under auto-handoff. They're stored in `~/.cl
 
 | Setting | Default | What it does |
 |---|---|---|
-| `threshold` | `150000` | Context tokens that trigger a handoff; the soft line sits 20k below it. Never closer than 40k to the context window, so a 300k setting becomes 160k on a 200k window. A seeded session hands off no sooner than 40k past its own starting size, whatever this says; set it lower than that and the panel tells you where the line actually is |
+| `threshold` | `220000` | Context tokens that trigger a handoff; the soft line sits 20k below it. Never closer than 40k to the context window, so a 300k setting becomes 160k on a 200k window. A seeded session hands off no sooner than 40k past its own starting size, whatever this says; set it lower than that and the panel tells you where the line actually is |
 | `maxConsecutiveHandoffs` | `2` | Handoffs allowed before you type a prompt; past this, the mod pauses until you do |
 | `briefTemplate` | `~/.claude/auto-handoff/brief.md` | Your copy of the sections Haiku writes |
 | `instructionsTemplate` | `~/.claude/auto-handoff/instructions.md` | Your copy of what the fresh session is told to do |

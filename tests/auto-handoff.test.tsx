@@ -658,7 +658,7 @@ describe('auto-handoff', () => {
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     const clearing = await band($)
-    expect(clearing).toContain('auto-handoff · 165k / 150k')
+    expect(clearing).toContain('auto-handoff · 165k / 160k')
     expect(clearing).toContain('✓ brief written')
     expect(clearing).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] clearing/)
     await clock.advance(100)
@@ -685,13 +685,13 @@ describe('auto-handoff', () => {
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     await settle(() => calls.toasts.length > 0)
-    expect(calls.toasts).toEqual(['context 165k is past 150k: handing off'])
+    expect(calls.toasts).toEqual(['context 165k is past 160k: handing off'])
     await $.classic.SessionStart({ source: 'clear' })
     await settle(() => calls.seeded.length > 0)
     calls.tokens = 47_000
     await step($, 0)
     await settle(() => calls.toasts.length > 1)
-    expect(calls.toasts).toEqual(['context 165k is past 150k: handing off', '↪ handed off · 165k → 47k'])
+    expect(calls.toasts).toEqual(['context 165k is past 160k: handing off', '↪ handed off · 165k → 47k'])
   })
 
   test('a facts-only brief stays on the panel until dismissed', async ($, on) => {
@@ -920,15 +920,15 @@ describe('context manager', () => {
     expect(brief).toMatch(/#0 \d{4}-\d{2}-\d{2} old-sess · /)
   })
 
-  test('on a 1M window the default threshold is 150k, uncapped', async ($, on) => {
-    const calls = engine(on, { tokens: 145_000, window: 1_000_000 })
+  test('on a 1M window the default threshold is 220k, uncapped', async ($, on) => {
+    const calls = engine(on, { tokens: 215_000, window: 1_000_000 })
     await $.turn.complete(TURN)
     await settle(() => false)
     expect(calls.completes).toBe(0)
-    calls.tokens = 155_000
+    calls.tokens = 225_000
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
-    expect(calls.prompts[0]).toContain('**Threshold:** 150000 (150k), from threshold in /config\n')
+    expect(calls.prompts[0]).toContain('**Threshold:** 220000 (220k), from threshold in /config\n')
   })
 
   test('on a 200k window a 300k threshold is capped at 160k, and the brief says why', { options: { threshold: 300_000 } }, async ($, on) => {
@@ -1023,10 +1023,10 @@ describe('context manager', () => {
   })
 
   test('past the soft line a tool result asks for a handoff with a brief, once', async ($, on) => {
-    const calls = engine(on, { tokens: 135_000 })
+    const calls = engine(on, { tokens: 205_000, window: 1_000_000 })
     const r = await $.tool.call({ tool: 'Read', file_path: '/a.ts' } as never) as { context?: string[] }
     expect(calls.ran).toBe(1)
-    expect(r.context?.join('')).toContain('hands off at 150k')
+    expect(r.context?.join('')).toContain('hands off at 220k')
     expect(r.context?.join('')).toContain('mcp__auto-handoff__handoff')
     expect(r.context?.join('')).toContain('## Next Step')
     const again = await $.tool.call({ tool: 'Read', file_path: '/b.ts' } as never) as { context?: string[] }

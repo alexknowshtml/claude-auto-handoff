@@ -12,8 +12,8 @@
     "threshold": {
       "type": "number",
       "title": "Handoff threshold (tokens)",
-      "description": "Context size that triggers a handoff. 20k before it, the model is asked to finish its step and hand off with its own brief. The 150k default is the measured optimum for token cost plus wall time (see config.ts). Never closer than 40k to the context window, so a 300k setting becomes 160k on a 200k window. AUTO_HANDOFF_TOKENS overrides it for a test run, and /handoff 60k for one session. A seeded session hands off no sooner than 40k past its starting size; the panel above the prompt says so when this is set lower.",
-      "default": 150000
+      "description": "Context size that triggers a handoff. 20k before it, the model is asked to finish its step and hand off with its own brief. The 220k default trades some of the measured saving for more work between handoffs (see config.ts). Never closer than 40k to the context window, so a 300k setting becomes 160k on a 200k window. AUTO_HANDOFF_TOKENS overrides it for a test run, and /handoff 60k for one session. A seeded session hands off no sooner than 40k past its starting size; the panel above the prompt says so when this is set lower.",
+      "default": 220000
     },
     "maxConsecutiveHandoffs": {
       "type": "number",
