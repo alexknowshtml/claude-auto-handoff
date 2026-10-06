@@ -51,7 +51,7 @@ const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, c
 declare const setTimeout: (fn: (...args: never[]) => void, ms: number) => unknown
 
 // The engine beneath the plugin: everything the mod calls, answered from memory.
-function engine(on: On, opts: { tokens: number; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[]; window?: number; fork?: string | null | Error }): Calls {
+function engine(on: On, opts: { tokens: number; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[]; window?: number; fork?: string | null | Error; answer?: string; callsHandoff?: boolean }): Calls {
   const calls: Calls = { compacts: 0, steps: 0, cleared: 0, seeded: [], written: {}, completes: 0, tokens: opts.tokens, prompts: [], toasts: [], ran: 0, history: [], forks: [] }
   let sessionId = 'old-session'
   let clears = 0
@@ -136,7 +136,8 @@ function engine(on: On, opts: { tokens: number; files?: Record<string, string>; 
       : null
     if (usage) yield { kind: 'text', index: 0, text: 'reading' }
     yield { kind: 'stop', stopReason: 'tool_use', usage }
-    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'tool_use', usage }
+    // callsHandoff: the response calls the handoff tool, with answer as its visible text.
+    return { turnId: e.turnId, index: e.index, answer: opts.answer ?? '', toolUses: opts.callsHandoff ? [{ name: 'mcp__auto-handoff__handoff', input: {} }] : [], stopReason: 'tool_use', usage }
   })
   on('tool.call', async (_$, e) => (calls.ran++, { result: { content: '' }, text: 'x'.repeat(('file_path' in e && e.file_path === '/streamed.txt' ? opts.streamToolChars : opts.toolChars) ?? 0) }))
   return calls
@@ -959,7 +960,7 @@ describe('context manager', () => {
   test('the handoff tool hands off at the model\'s call, past the gate', async ($, on) => {
     const calls = engine(on, { tokens: 120_000 })
     const r = await $.tool.call({ tool: 'mcp__auto-handoff__handoff' } as never)
-    expect(JSON.stringify(r)).toContain('Handoff started')
+    expect(JSON.stringify(r)).toContain('Handoff queued')
     await settle(() => calls.cleared > 0)
     expect(calls.prompts[0]).toContain('**Trigger:** the handoff tool (the model asked)')
     expect(calls.ran).toBe(0)
@@ -1043,7 +1044,7 @@ describe('context manager', () => {
   test('a brief passed to the handoff tool is the brief: no fork, no Haiku, no further request', async ($, on) => {
     const calls = engine(on, { tokens: 140_000, fork: '## Next Step\nForked.' })
     const r = await $.tool.call({ tool: 'mcp__auto-handoff__handoff', brief: '## Next Step\nShip the soft line.' } as never)
-    expect(JSON.stringify(r)).toContain('Handoff started')
+    expect(JSON.stringify(r)).toContain('Handoff queued')
     await settle(() => calls.cleared > 0)
     const brief = calls.written['/home/test/.claude/state/auto-handoff/old-session.md']
     expect(brief).toContain('Ship the soft line.')
@@ -1053,12 +1054,56 @@ describe('context manager', () => {
     expect(calls.prompts.length).toBe(0)
   })
 
-  test('the step after a handoff call ends the turn without a request', async ($, on) => {
+  test('a handoff call with no reply gets one step to write it, then the turn ends', async ($, on) => {
     const calls = engine(on, { tokens: 140_000 })
-    await $.tool.call({ tool: 'mcp__auto-handoff__handoff', brief: '## Next Step\nShip it.' } as never)
-    const chunks = await step($)
-    expect(calls.steps).toBe(0)
+    const r = await $.tool.call({ tool: 'mcp__auto-handoff__handoff', brief: '## Next Step\nShip it.' } as never)
+    expect(JSON.stringify(r)).toContain('give that full reply now')
+    await step($)
+    expect(calls.steps).toBe(1)
+    const chunks = await step($, 2)
+    expect(calls.steps).toBe(1)
     expect(chunks.map(c => c.text ?? '').join('')).toContain('Handing off to a fresh session')
+  })
+
+  test('a handoff call that came with its reply ends the turn without a request', async ($, on) => {
+    const calls = engine(on, { tokens: 140_000, answer: 'Done: both changes are in.', callsHandoff: true })
+    await step($)
+    await $.tool.call({ tool: 'mcp__auto-handoff__handoff', brief: '## Next Step\nShip it.' } as never)
+    const chunks = await step($, 2)
+    expect(calls.steps).toBe(1)
+    expect(chunks.map(c => c.text ?? '').join('')).toContain('Handing off to a fresh session')
+  })
+
+  test('the reply after a handoff call lands in the brief and the seed', async ($, on) => {
+    const row = (id: string, content: unknown[]) => JSON.stringify({ type: 'assistant', message: { id, role: 'assistant', content } })
+    const transcript = [
+      JSON.stringify({ type: 'user', message: { role: 'user', content: 'make those changes' } }),
+      row('m1', [{ type: 'tool_use', id: 't1', name: 'mcp__auto-handoff__handoff', input: {} }]),
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'queued' }] } }),
+      row('m2', [{ type: 'text', text: 'Both changes are in; 110 tests pass.' }]),
+      row('m3', [{ type: 'text', text: '[auto-handoff] Handing off to a fresh session.' }]),
+    ].join('\n')
+    const calls = engine(on, { tokens: 140_000, files: { '/home/test/.claude/projects/-home-test-proj/old-session.jsonl': transcript } })
+    await $.tool.call({ tool: 'mcp__auto-handoff__handoff', brief: '## Next Step\nShip it.' } as never)
+    await settle(() => calls.cleared > 0)
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    const brief = calls.written['/home/test/.claude/state/auto-handoff/old-session.md']
+    expect(brief).toContain('## Final Reply Shown to the User')
+    expect(brief).toContain('Both changes are in; 110 tests pass.')
+    expect(brief).not.toContain('[auto-handoff] Handing off')
+    expect(calls.seeded[0]).toContain('Both changes are in; 110 tests pass.')
+  })
+
+  test('a handoff call with no reply text says so in the brief, and the seed stays one line', async ($, on) => {
+    const transcript = JSON.stringify({ type: 'assistant', message: { id: 'm1', role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'mcp__auto-handoff__handoff', input: {} }] } })
+    const calls = engine(on, { tokens: 140_000, files: { '/home/test/.claude/projects/-home-test-proj/old-session.jsonl': transcript } })
+    await $.tool.call({ tool: 'mcp__auto-handoff__handoff', brief: '## Next Step\nShip it.' } as never)
+    await settle(() => calls.cleared > 0)
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    expect(calls.written['/home/test/.claude/state/auto-handoff/old-session.md']).toContain('with no reply text')
+    expect(calls.seeded[0]?.split('\n').length).toBe(1)
   })
 
   test('a handoff tool brief with no sections falls back to the fork', async ($, on) => {

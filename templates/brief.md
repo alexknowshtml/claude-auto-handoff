@@ -28,7 +28,7 @@ Approaches tried and ruled out, and why.
 For each issue in "GitHub Issues Mentioned": what was done with it, and whether to update or close it next.
 
 ## Last Request from the User
-Copy "Last Real User Message" verbatim. Then "Status: Answered / Partially answered / Not answered". If not fully answered: "Context needed: <file, command, or issue to check>".
+Copy "Last Real User Message" verbatim. Then "Status: Answered / Partially answered / Not answered". Mark it Answered only if a reply the user can already see answers it; a reply still to be written does not count. If not fully answered: "Context needed: <file, command, or issue to check>".
 
 ## Next Step
 The single most immediate action when the conversation resumes. If the last request is unanswered, answer it.

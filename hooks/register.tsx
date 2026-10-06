@@ -1,5 +1,5 @@
 import type { EngineInterface, Register, SessionMessage, Timer } from 'claude-code'
-import { assembleBrief, briefPrompt, extractFacts, factsBlock, forkPrompt, isValidBrief, markUnverifiedFigures, softNote } from './brief.ts'
+import { assembleBrief, briefPrompt, extractFacts, factsBlock, finalReply, forkPrompt, isValidBrief, markUnverifiedFigures, replySection, softNote } from './brief.ts'
 import type { Facts } from './brief.ts'
 import { chainOf, parseBrief, renderPage, sections, viewerLink, withHeader } from './viewer.ts'
 import type { Entry } from './viewer.ts'
@@ -25,13 +25,19 @@ const CHARS_PER_TOKEN = 4
 const LOG = `~/${BRIEF_DIR}/auto-handoff.log`
 
 // problem: why the brief is facts only, when Haiku's summary was unusable.
-type Pending = { oldSession: string; briefPath: string; tokens: number; chain: string; link: string; problem?: string }
+// transcript: the old session's, read at seeding for the reply it ended on.
+type Pending = { oldSession: string; briefPath: string; tokens: number; chain: string; link: string; transcript: string; problem?: string }
 
 
 
 // Module variables survive /clear; $.state does not.
 let pending: Pending | undefined
 let inFlight = false
+// The model called the handoff tool and its turn may still owe the user a reply: the step after
+// the call runs once if that call came with no text. Two flags, since the tool can run before or
+// after the step that called it returns.
+let replyOwed = false
+let calledWithText = false
 let seededSession: string | undefined
 let floor: number | undefined
 let unattended = 0 // handoffs since the user last typed a prompt
@@ -340,7 +346,7 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     await $.fs.write(briefPath, withHeader(header, brief))
     void recordHistory($, history, { at: header.at, session: sessionId, transcript }, problem ? factsBlock(facts) : checked.text, factsDigest(facts))
     const link = await viewer($, briefDir, pagesDir, sessionId)
-    pending = { oldSession: sessionId, briefPath, tokens, chain, link, problem }
+    pending = { oldSession: sessionId, briefPath, tokens, chain, link, transcript, problem }
     steps($, [briefStep(problem), { mark: 'spin', text: 'clearing' }])
     await $.store.set(`fired:${sessionId}`, problem ? `clearing-facts-only:${problem}` : 'clearing')
     await log($, `brief written ${briefPath} (${brief.length} chars); queueing /clear`)
@@ -387,6 +393,7 @@ async function tryHandoff($: EngineInterface, sessionId: string, tokens: number,
   unattended++
 
   inFlight = true
+  replyOwed = false
   gated = undefined
   await $.store.set(`fired:${sessionId}`, 'briefing')
   await log($, `threshold session=${sessionId} tokens=${tokens} threshold=${threshold} via=${via}`)
@@ -560,7 +567,7 @@ async function warnTightThreshold($: EngineInterface, sessionId: string) {
 const HANDOFF_TOOL = 'handoff'
 const handoffTool = ($: EngineInterface) => `mcp__${$.plugin.name}__${HANDOFF_TOOL}`
 const toolAnswer = (text: string) => ({ result: { content: [{ type: 'text' as const, text }], isError: false } })
-const HANDOFF_TOOL_DESCRIPTION = 'Hand this session off to a fresh one: the context is cleared and work resumes from a brief, with the project\'s history. Pass `brief`, written for a fresh session that sees none of this conversation (state, decisions, dead ends, next step); without it a brief is written for you, at extra cost. Call it when told the session is near its handoff line, when the user asks, or when a phase of work has just finished (committed, tests green) and the context is past about 100k tokens. Make no tool calls after it.'
+const HANDOFF_TOOL_DESCRIPTION = 'Hand this session off to a fresh one: the context is cleared and work resumes from a brief, with the project\'s history. Pass `brief`, written for a fresh session that sees none of this conversation (state, decisions, dead ends, next step); without it a brief is written for you, at extra cost. Call it when told the session is near its handoff line, when the user asks, or when a phase of work has just finished (committed, tests green) and the context is past about 100k tokens. Write any reply the user is waiting for before calling it: call it last, and make no tool calls after it.'
 const HANDOFF_TOOL_SCHEMA = { type: 'object', properties: { brief: { type: 'string', description: 'The handoff brief, in the sections the handoff note lists.' } } }
 
 // The model's own call, at a phase boundary: hand off now, whatever the threshold says. A seeded
@@ -573,8 +580,9 @@ async function handoffByTool($: EngineInterface, agentId?: string, brief?: strin
   if (sessionId === seededSession && floor !== undefined && tokens < floor + MIN_HEADROOM)
     return toolAnswer(`Not handed off: this session started at ${k(floor)} from a handoff and is at ${k(tokens)}. Do more work first.`)
   const started = await tryHandoff($, sessionId, tokens, await thresholdFor($, sessionId), brief ? 'tool brief' : 'tool', brief)
+  if (started) replyOwed = true
   return toolAnswer(started
-    ? 'Handoff started. The session clears and resumes from the brief once this turn ends. Make no more tool calls: end your turn with one line saying so.'
+    ? 'Handoff queued: the session clears once this turn ends. If you have not yet replied to the user\'s last message, give that full reply now; otherwise end with one line. Make no more tool calls.'
     : 'Not handed off: auto-handoff is paused or turned off here, or this session already handed off. Carry on.')
 }
 
@@ -689,6 +697,11 @@ export const register: Register = (on, options) => {
     // A handoff under way (the model's handoff call, mostly): end the turn without the request
     // that would only carry the model's sign-off line over the whole context.
     if (!e.agentId && (inFlight || pending) && e.index > 0) {
+      // Except one step for the reply, when the model called the tool before writing it.
+      if (replyOwed) {
+        replyOwed = false
+        if (!calledWithText) return yield* next(e)
+      }
       yield { kind: 'text', index: 0, text: '[auto-handoff] Handing off to a fresh session.' }
       yield { kind: 'stop', stopReason: 'end_turn', usage: null }
       return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null }
@@ -720,6 +733,7 @@ export const register: Register = (on, options) => {
     const before = unmeasured
     const seeding = !e.agentId && seededSession !== undefined && floor === undefined
     const r = yield* next(e)
+    if (!e.agentId && r.toolUses.some(u => u.name === handoffTool($))) calledWithText = !!r.answer.trim()
     // The response measured everything up to its request; its own output is new, and so is
     // any tool output that landed while it streamed (core runs tools before the stream ends).
     if (!e.agentId && r.usage) unmeasured = unmeasured - before + r.usage.output_tokens
@@ -799,6 +813,8 @@ export const register: Register = (on, options) => {
       seededSession = newSession
       floor = undefined
       unmeasured = 0
+      replyOwed = false
+      calledWithText = false
       await $.store.set(`fired:${p.oldSession}`, `seeded:${newSession}`)
       await log($, `seeding new=${newSession} from=${p.oldSession}`)
       handedFrom = { session: p.oldSession, tokens: p.tokens, link: p.link, problem: p.problem }
@@ -807,11 +823,20 @@ export const register: Register = (on, options) => {
       const prior = own ? own.depth : 1
       lineage = { from: p.oldSession, chain: p.chain, depth: prior !== undefined ? prior + 1 : undefined }
       await $.store.set(`lineage:${newSession}`, lineage)
+      // The reply the old session ended on, after its handoff call: the brief was written before
+      // it, and the clear can take it off the screen. undefined for a handoff the tool did not start.
+      let reply: string | undefined
+      try {
+        reply = finalReply(await $.fs.read(expand(p.transcript, await $.env.get('HOME') ?? '')) as string, handoffTool($))
+      } catch (err) {
+        await log($, `final reply unread ${String(err)}`)
+      }
       // The old brief learns where it went, and its chain's pages link forward.
       try {
         const old = parseBrief(await $.fs.read(p.briefPath) as string)
+        const body = reply === undefined ? old.body : `${old.body.trimEnd()}\n\n${replySection(reply)}`
         // viewer: the page link, read by the status line script for the session it handed off to.
-        await $.fs.write(p.briefPath, withHeader({ ...old.header, to: newSession, ...(p.link ? { viewer: p.link } : {}) }, old.body))
+        await $.fs.write(p.briefPath, withHeader({ ...old.header, to: newSession, ...(p.link ? { viewer: p.link } : {}) }, body))
         const briefDir = p.briefPath.replace(/\/[^/]+$/, '')
         await viewer($, briefDir, `${briefDir}/pages`, p.oldSession)
       } catch (err) {
@@ -819,7 +844,7 @@ export const register: Register = (on, options) => {
       }
       // One line on screen; the model reads the brief from disk. A full brief as the
       // seed showed up as a wall of text the person never wrote.
-      const text = `${SEED_PREFIX} ${short(p.oldSession)}. The previous session hit its context limit and was cleared. Read the brief at ${p.briefPath} before doing anything else${p.link ? ` (readable copy: ${p.link})` : ''} and follow its Instructions section. Open your first reply with the line "↪ Handoff from session ${short(p.oldSession)}".`
+      const text = `${SEED_PREFIX} ${short(p.oldSession)}. The previous session hit its context limit and was cleared. Read the brief at ${p.briefPath} before doing anything else${p.link ? ` (readable copy: ${p.link})` : ''} and follow its Instructions section. Open your first reply with the line "↪ Handoff from session ${short(p.oldSession)}".${reply ? `\n\nThe previous session's last reply:\n\n${reply}` : ''}`
       $.prompt.submit({ text }).catch((err: unknown) => {
         handedFrom = undefined
         failed($, 'the seed prompt was rejected', `paste the brief path to carry on: ${p.briefPath}`)
