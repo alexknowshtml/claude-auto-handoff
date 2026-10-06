@@ -172,29 +172,6 @@ export function softNote(tool: string, tokens: number, threshold: number, templa
   return `[auto-handoff] Context is at about ${k(tokens)} tokens; this session hands off at ${k(threshold)}. Finish the work in hand in this turn (do not start new work). If the user is waiting for a reply, write it in full first: the handoff call is the last thing in your turn. Then call ${tool} with \`brief\`: a handoff brief for a fresh session that will see none of this conversation. Use these sections in this order, omitting empty ones. State no token counts and list no files or commits: code adds those. In "Last Request from the User", mark it Answered only if a reply the user can already see answers it. Make no tool calls after it.\n\n${briefSections(template)}`
 }
 
-type Row = { type?: string; isSidechain?: boolean; message?: { id?: string; content?: unknown } }
-type Block = { type?: string; text?: unknown; name?: unknown }
-
-/**
- * The reply the model showed the user at its handoff call: the text it wrote after its last call
- * to `tool`, or, with nothing after, the text of the response that made the call. undefined when
- * the transcript holds no such call; '' when the call came with no reply.
- */
-export function finalReply(jsonl: string, tool: string): string | undefined {
-  const rows = jsonl.split('\n').flatMap((line): Row[] => {
-    try { return [JSON.parse(line)] } catch { return [] }
-  }).filter(r => r?.type === 'assistant' && !r.isSidechain && Array.isArray(r.message?.content))
-  const blocks = (r: Row) => r.message!.content as Block[]
-  const at = rows.findLastIndex(r => blocks(r).some(b => b?.type === 'tool_use' && b.name === tool))
-  if (at < 0) return undefined
-  // The mod's own stop line is not the model's reply.
-  const texts = (rs: Row[]) => rs.flatMap(blocks).flatMap(b => b?.type === 'text' && typeof b.text === 'string' && !b.text.startsWith('[auto-handoff]') && b.text.trim() ? [b.text.trim()] : [])
-  const after = texts(rows.slice(at + 1))
-  if (after.length) return after.join('\n\n')
-  const id = rows[at]!.message!.id
-  return texts(id ? rows.filter(r => r.message!.id === id) : [rows[at]!]).join('\n\n')
-}
-
 /** The brief's closing section: what the user last saw, so the next session does not redo it. */
 export function replySection(reply: string): string {
   return reply

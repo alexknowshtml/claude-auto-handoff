@@ -1066,56 +1066,81 @@ describe('context manager', () => {
     expect(calls.prompts.length).toBe(0)
   })
 
-  test('a handoff call with no reply gets one step to write it, then the turn ends', async ($, on) => {
-    const calls = engine(on, { tokens: 140_000 })
-    const r = await $.tool.call({ tool: 'mcp__auto-handoff__handoff', brief: '## Next Step\nShip it.' } as never)
-    expect(JSON.stringify(r)).toContain('give that full reply now')
-    await step($)
-    expect(calls.steps).toBe(1)
-    const chunks = await step($, 2)
-    expect(calls.steps).toBe(1)
-    expect(chunks.map(c => c.text ?? '').join('')).toContain('Handing off to a fresh session')
+  test('the handoff tool answers with a string, the shape a registered tool\'s result must have', async ($, on) => {
+    engine(on, { tokens: 140_000 })
+    const r = await $.tool.call({ tool: 'mcp__auto-handoff__handoff', brief: '## Next Step\nShip it.' } as never) as { result?: unknown }
+    expect(typeof r.result).toBe('string')
+    expect(r.result).toContain('Handoff queued')
   })
 
-  test('a handoff call that came with its reply ends the turn without a request', async ($, on) => {
-    const calls = engine(on, { tokens: 140_000, answer: 'Done: both changes are in.', callsHandoff: true })
-    await step($)
+  test('a queued handoff lets the turn run on: its tools and requests go through', async ($, on) => {
+    const calls = engine(on, { tokens: 140_000 })
     await $.tool.call({ tool: 'mcp__auto-handoff__handoff', brief: '## Next Step\nShip it.' } as never)
-    const chunks = await step($, 2)
-    expect(calls.steps).toBe(1)
-    expect(chunks.map(c => c.text ?? '').join('')).toContain('Handing off to a fresh session')
+    await step($)
+    const r = await $.tool.call({ tool: 'Read', file_path: '/a.ts' } as never) as { deny?: string }
+    expect(r.deny).toBeUndefined()
+    expect(calls.ran).toBe(1)
+    await step($, 2)
+    expect(calls.steps).toBe(2)
+  })
+
+  test('a queued handoff still stops the turn at the backstop', async ($, on) => {
+    const opts = { tokens: 140_000 }
+    const calls = engine(on, opts)
+    await $.tool.call({ tool: 'mcp__auto-handoff__handoff', brief: '## Next Step\nShip it.' } as never)
+    calls.tokens = 225_000
+    const r = await $.tool.call({ tool: 'Read', file_path: '/a.ts' } as never) as { deny?: string }
+    expect(r.deny).toContain('near its limit')
+    const chunks = await step($)
+    expect(calls.steps).toBe(0)
+    expect(chunks.map(c => c.text ?? '').join('')).toContain('Stopping this turn to hand off')
   })
 
   test('the reply after a handoff call lands in the brief and the seed', async ($, on) => {
-    const row = (id: string, content: unknown[]) => JSON.stringify({ type: 'assistant', message: { id, role: 'assistant', content } })
-    const transcript = [
-      JSON.stringify({ type: 'user', message: { role: 'user', content: 'make those changes' } }),
-      row('m1', [{ type: 'tool_use', id: 't1', name: 'mcp__auto-handoff__handoff', input: {} }]),
-      JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'queued' }] } }),
-      row('m2', [{ type: 'text', text: 'Both changes are in; 110 tests pass.' }]),
-      row('m3', [{ type: 'text', text: '[auto-handoff] Handing off to a fresh session.' }]),
-    ].join('\n')
-    const calls = engine(on, { tokens: 140_000, files: { '/home/test/.claude/projects/-home-test-proj/old-session.jsonl': transcript } })
+    const opts: { tokens: number; answer?: string; callsHandoff?: boolean } = { tokens: 140_000, callsHandoff: true }
+    const calls = engine(on, opts)
+    await step($)
     await $.tool.call({ tool: 'mcp__auto-handoff__handoff', brief: '## Next Step\nShip it.' } as never)
+    opts.callsHandoff = false
+    opts.answer = 'Both changes are in; 110 tests pass.'
+    await step($, 2)
     await settle(() => calls.cleared > 0)
     await $.classic.SessionStart({ source: 'clear' })
     await settle(() => calls.seeded.length > 0)
     const brief = calls.written['/home/test/.claude/state/auto-handoff/old-session.md']
     expect(brief).toContain('## Final Reply Shown to the User')
     expect(brief).toContain('Both changes are in; 110 tests pass.')
-    expect(brief).not.toContain('[auto-handoff] Handing off')
     expect(calls.seeded[0]).toContain('Both changes are in; 110 tests pass.')
   })
 
   test('a handoff call with no reply text says so in the brief, and the seed stays one line', async ($, on) => {
-    const transcript = JSON.stringify({ type: 'assistant', message: { id: 'm1', role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'mcp__auto-handoff__handoff', input: {} }] } })
-    const calls = engine(on, { tokens: 140_000, files: { '/home/test/.claude/projects/-home-test-proj/old-session.jsonl': transcript } })
+    const calls = engine(on, { tokens: 140_000, callsHandoff: true })
+    await step($)
     await $.tool.call({ tool: 'mcp__auto-handoff__handoff', brief: '## Next Step\nShip it.' } as never)
     await settle(() => calls.cleared > 0)
     await $.classic.SessionStart({ source: 'clear' })
     await settle(() => calls.seeded.length > 0)
     expect(calls.written['/home/test/.claude/state/auto-handoff/old-session.md']).toContain('with no reply text')
     expect(calls.seeded[0]?.split('\n').length).toBe(1)
+  })
+
+  test('a refused handoff call carries no reply into a later handoff', async ($, on) => {
+    const calls = engine(on, { tokens: 165_000, answer: 'Stale.', callsHandoff: true })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    calls.tokens = 47_000
+    await $.turn.complete(TURN) // the floor
+    calls.tokens = 60_000
+    await step($)
+    await $.tool.call({ tool: 'mcp__auto-handoff__handoff' } as never) // refused: do more work first
+    calls.tokens = 230_000
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 1)
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 1)
+    expect(calls.seeded[1]).not.toContain('Stale.')
   })
 
   test('a handoff tool brief with no sections falls back to the fork', async ($, on) => {
