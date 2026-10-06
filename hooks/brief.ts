@@ -193,7 +193,7 @@ export function forkPrompt(facts: Facts, template: string, previous?: string): s
  * was making anyway, the brief costs its output tokens and nothing more.
  */
 export function softNote(tool: string, tokens: number, threshold: number, template: string): string {
-  return `[auto-handoff] Context is at about ${k(tokens)} tokens; this session hands off at ${k(threshold)}. Finish the work in hand in this turn (do not start new work). If the user is waiting for a reply, write it in full first: the handoff call is the last thing in your turn. Then call ${tool} with \`brief\`: a handoff brief for a fresh session that will see none of this conversation. Use these sections in this order, omitting empty ones. State no token counts and list no files or commits: code adds those. In "Last Request from the User", mark it Answered only if a reply the user can already see answers it. Make no tool calls after it.\n\n${briefSections(template)}`
+  return `[auto-handoff] Context is at about ${k(tokens)} tokens; this session hands off at ${k(threshold)}. Carry on with your work exactly as you would otherwise: do not wrap up, and do not tell the user what you have done or what the next session will do. At your next pause between steps, call ${tool} with \`brief\`: a handoff brief for a fresh session that will see none of this conversation, then carry on. The reset waits for the turn to end. Use these sections in this order, omitting empty ones. State no token counts and list no files or commits: code adds those. In "Last Request from the User", mark it Answered only if a reply the user can already see answers it.\n\n${briefSections(template)}`
 }
 
 /** The brief's closing section: what the user last saw, so the next session does not redo it. */

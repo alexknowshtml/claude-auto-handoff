@@ -661,7 +661,7 @@ const handoffTool = ($: EngineInterface) => `mcp__${$.plugin.name}__${HANDOFF_TO
 // A registered tool's result is checked against string | content blocks: an MCP-style
 // { content, isError } object fails that check and reaches the model as an error.
 const toolAnswer = (text: string) => ({ result: text })
-const HANDOFF_TOOL_DESCRIPTION = 'Hand this session off to a fresh one: the context is cleared and work resumes from a brief, with the project\'s history. Pass `brief`, written for a fresh session that sees none of this conversation (state, decisions, dead ends, next step); without it a brief is written for you, at extra cost. Call it when told the session is near its handoff line, when the user asks, or when a phase of work has just finished (committed, tests green) and the context is past about 100k tokens. The session clears only once the turn has fully ended: finish the work in hand and give the user your full reply, which is carried to the fresh session.'
+const HANDOFF_TOOL_DESCRIPTION = 'Hand this session off to a fresh one: the context is cleared and work resumes from a brief, with the project\'s history. Pass `brief`, written for a fresh session that sees none of this conversation (state, decisions, dead ends, next step); without it a brief is written for you, at extra cost. Call it when told the session is near its handoff line, when the user asks, or when a phase of work has just finished (committed, tests green) and the context is past about 100k tokens. The session clears only once the turn has fully ended; until then carry on as normal. The brief carries the state forward, so write no wrap-up, summary or next-session plan for the user.'
 const HANDOFF_TOOL_SCHEMA = { type: 'object', properties: { brief: { type: 'string', description: 'The handoff brief, in the sections the handoff note lists.' } } }
 
 // The model's own call, at a phase boundary: hand off now, whatever the threshold says. A seeded
@@ -676,7 +676,7 @@ async function handoffByTool($: EngineInterface, agentId?: string, brief?: strin
   const started = await tryHandoff($, sessionId, tokens, await thresholdFor($, sessionId), brief ? 'tool brief' : 'tool', brief)
   if (started) toolReply = { withCall: callText, after: [] }
   return toolAnswer(started
-    ? 'Handoff queued: the session clears once this turn has fully ended. Finish the work in hand, then give the user your full reply to their last message; it is carried to the fresh session.'
+    ? 'Handoff queued: the session clears once this turn has fully ended. Carry on with the task as normal; write no wrap-up or summary for the user, since the brief carries that.'
     : 'Not handed off: auto-handoff is paused or turned off here, or this session already handed off. Carry on.')
 }
 

@@ -39,7 +39,7 @@ export type Config = { threshold: number; maxUnattended: number; briefTemplate: 
 export const DEFAULTS: Config = { threshold: 220_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: '', historyLines: 8, briefWriter: 'fork', resetMode: 'compact' }
 export const MIN_HEADROOM = 40_000
 // The soft line sits this far below the threshold. Past it, the next tool result tells the model
-// to finish its step and call the handoff tool with the brief as its argument: the brief is then
+// to call the handoff tool with the brief at its next pause and carry on: the brief is then
 // written inside a request the session was making anyway. 20k is about 11 requests at the measured
 // mean growth, 6 at the 90th percentile.
 export const SOFT_MARGIN = 20_000
