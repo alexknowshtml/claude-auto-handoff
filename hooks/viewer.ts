@@ -3,6 +3,8 @@
 // share a chain id or a from/to link are one run of handoffs, and every page in a run lists all of them.
 // The page renders the brief's markdown in the browser from a CDN, so the mod ships no packages.
 
+import { short } from './config.ts'
+
 export type Header = { from?: string; to?: string; chain?: string; depth?: string; tokens?: string; at?: string; cwd?: string; viewer?: string }
 export type Entry = { id: string; header: Header; body: string }
 
@@ -48,7 +50,7 @@ export function chainOf(entries: readonly Entry[], id: string): Entry[] {
 /** The page's address: served when the mod runs a server, else the local file. The served link
  * uses the session id's first 8 characters, short enough to stay on one line on a phone. */
 export function viewerLink(serve: { host: string; port: string } | undefined, pagesDir: string, sessionId: string): string {
-  return serve ? `http://${serve.host}:${serve.port}/${sessionId.slice(0, 8)}` : `file://${pagesDir}/${sessionId}.html`
+  return serve ? `http://${serve.host}:${serve.port}/${short(sessionId)}` : `file://${pagesDir}/${sessionId}.html`
 }
 
 // Sections meant for the fresh session, not for a person reading the page.
@@ -67,7 +69,6 @@ function oneLiner(body: string): string {
 }
 
 const esc = (s: string) => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!)
-const short = (id: string) => id.slice(0, 8)
 const when = (iso?: string) => {
   if (!iso) return ''
   const d = new Date(iso)

@@ -6,7 +6,7 @@ import { renderTemplate } from '../hooks/templates.ts'
 import { parseBrief } from '../hooks/viewer.ts'
 import { parseLog } from '../hooks/history.ts'
 
-type Calls = { compacts: number; steps: number; cleared: number; seeded: string[]; written: Record<string, string>; completes: number; tokens: number; prompts: string[]; toasts: string[]; ran: number; history: string[]; forks: string[] }
+type Calls = { compacts: number; compactRuns: string[]; steps: number; cleared: number; seeded: string[]; written: Record<string, string>; completes: number; tokens: number; prompts: string[]; toasts: string[]; ran: number; history: string[]; forks: string[] }
 
 // The test runs sandboxed, with no file access, so these stand in for the files in templates/:
 // the same headings and switches, shorter prose.
@@ -52,7 +52,7 @@ declare const setTimeout: (fn: (...args: never[]) => void, ms: number) => unknow
 
 // The engine beneath the plugin: everything the mod calls, answered from memory.
 function engine(on: On, opts: { tokens: number; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[]; window?: number; fork?: string | null | Error; answer?: string; callsHandoff?: boolean }): Calls {
-  const calls: Calls = { compacts: 0, steps: 0, cleared: 0, seeded: [], written: {}, completes: 0, tokens: opts.tokens, prompts: [], toasts: [], ran: 0, history: [], forks: [] }
+  const calls: Calls = { compacts: 0, compactRuns: [], steps: 0, cleared: 0, seeded: [], written: {}, completes: 0, tokens: opts.tokens, prompts: [], toasts: [], ran: 0, history: [], forks: [] }
   let sessionId = 'old-session'
   let clears = 0
   mock.env(on, { HOME: '/home/test', ...(opts.env ?? {}) })
@@ -113,7 +113,11 @@ function engine(on: On, opts: { tokens: number; files?: Record<string, string>; 
     calls.toasts.push(e.text)
     return { value: undefined }
   })
-  on('command.run', async () => {
+  on('command.run', async (_$, e) => {
+    if (e.command === 'compact') {
+      calls.compactRuns.push(e.args)
+      return {}
+    }
     calls.cleared++
     sessionId = `new-session-${++clears}`
     return {}
@@ -606,6 +610,49 @@ describe('auto-handoff', () => {
     expect(calls.compacts).toBe(0)
     await settle(() => calls.cleared > 0)
     expect(calls.cleared).toBe(1)
+  })
+
+  test('resetMode compact: /compact in place of /clear, answered with one line, and the same session is seeded', { options: { resetMode: 'compact' } }, async ($, on) => {
+    const calls = engine(on, { tokens: 230_000 })
+    const dir = '/home/test/.claude/state/auto-handoff'
+    // The engine's /compact: the compaction through every hook, then SessionStart.
+    const compactRun = async (i: number) => {
+      await settle(() => calls.compactRuns.length > i)
+      const r = await $.session.compact({ trigger: 'manual', instructions: calls.compactRuns[i], messages: BASIC })
+      await $.classic.SessionStart({ source: 'compact' })
+      await settle(() => calls.seeded.length > i)
+      return r
+    }
+    await $.turn.complete(TURN)
+    const r = await compactRun(0)
+    expect(calls.cleared).toBe(0)
+    // The mod answers its own compaction: no summarizer, one line in the transcript's place.
+    expect(calls.compacts).toBe(0)
+    expect(r.messages?.map(m => m.text)).toEqual(['[auto-handoff] The conversation before this point was reset for a handoff; the brief follows.'])
+    expect(calls.seeded[0]).toContain('was reset')
+    expect(calls.seeded[0]).toContain(`Read the brief at ${dir}/old-session.md`)
+    // Same engine session, new segment: the old brief points forward to it.
+    expect(parseBrief(calls.written[`${dir}/old-session.md`] ?? '').header.to).toBe('old-session_1')
+    expect(await band($)).toContain('compacted')
+
+    // The segment hands off in turn, keyed by its own id, in the same chain.
+    calls.tokens = 47_000
+    await $.turn.complete(TURN)
+    calls.tokens = 260_000
+    await $.turn.complete(TURN)
+    await compactRun(1)
+    const second = parseBrief(calls.written[`${dir}/old-session_1.md`] ?? '').header
+    expect(second.from).toBe('old-session')
+    expect(second.chain).toBe('old-session')
+    expect(second.depth).toBe('2')
+    expect(second.to).toBe('old-session_2')
+    expect(calls.cleared).toBe(0)
+  })
+
+  test('a /compact with the handoff mark but no handoff under way is left to the engine', { options: { resetMode: 'compact' } }, async ($, on) => {
+    const calls = engine(on, { tokens: 100_000 })
+    await $.session.compact({ trigger: 'manual', instructions: '[auto-handoff] reset for a handoff', messages: BASIC })
+    expect(calls.compacts).toBe(1)
   })
 
   test('a manual /compact is left alone', async ($, on) => {

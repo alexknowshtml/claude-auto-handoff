@@ -56,6 +56,12 @@
       "title": "Brief writer",
       "description": "fork: the session's own model writes the brief over its cached transcript and sees the whole session (better carryover; billed as cache reads plus its output). haiku: Haiku writes it from the last 120 messages (cheaper). A failed fork falls back to Haiku.",
       "default": "fork"
+    },
+    "resetMode": {
+      "type": "string",
+      "title": "Reset mode",
+      "description": "clear: /clear starts a fresh session, and the earlier messages leave the screen. compact: the conversation is compacted down to one line, so the model starts from the brief while the screen keeps every earlier message.",
+      "default": "clear"
     }
   }
 }

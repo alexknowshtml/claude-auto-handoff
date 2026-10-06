@@ -7,12 +7,12 @@ import { SERVER_JS, parseAddress } from './server.ts'
 import { isSpinning, panelTree } from './panel.tsx'
 import type { Line, Panel } from './panel.tsx'
 import { BRIEF_DIR, DEFAULTS, LAST_RESORT_INSTRUCTIONS, MIN_HEADROOM, SEED_PREFIX, TEMPLATES, WINDOW_RESERVE, BACKSTOP_OVER, expand, k, linkify, parseConfig, parseTokens, short, SOFT_MARGIN } from './config.ts'
-import type { Config, TemplateKey } from './config.ts'
+import type { Config, ResetMode, TemplateKey } from './config.ts'
 import { HISTORY_HEADING, blockId, compressPrompt, digestPrompt, halfText, historySection, oneParagraph, parseLog, parseTree, pending as pendingBlocks, projectKey, repoRoot } from './history.ts'
 import type { Entry as HistoryEntry } from './history.ts'
 
-// At the token threshold, Haiku writes a handoff brief, the mod runs /clear, then seeds the
-// fresh session with a pointer to the brief. Interactive terminal sessions only: where a
+// At the token threshold, Haiku writes a handoff brief, the mod runs /clear (or compacts, with
+// resetMode "compact"), then seeds the fresh session with a pointer to the brief. Interactive terminal sessions only: where a
 // wrapper pipes the session and owns the context limit (DISABLE_AUTO_COMPACT), the mod only logs.
 
 let cfg: Config = DEFAULTS
@@ -25,7 +25,7 @@ const CHARS_PER_TOKEN = 4
 const LOG = `~/${BRIEF_DIR}/auto-handoff.log`
 
 // problem: why the brief is facts only, when Haiku's summary was unusable.
-type Pending = { oldSession: string; briefPath: string; tokens: number; chain: string; link: string; problem?: string }
+type Pending = { oldSession: string; briefPath: string; tokens: number; chain: string; link: string; problem?: string; mode: ResetMode }
 
 
 
@@ -63,6 +63,15 @@ let gated: string | undefined
 let nudged: string | undefined
 // From the latest SessionStart; /clear starts a new transcript file.
 let transcriptPath: string | undefined
+
+// The id the mod keys a session's state by (fired, lineage, the brief's file name). A compact
+// handoff keeps the engine's session id, so each one starts a new segment: <id>_<n> after the nth.
+// n lives in the store: a hot reload resets module variables.
+async function segmentId($: EngineInterface): Promise<string> {
+  const id = await $.session.id()
+  const n = await $.store.get(`segment:${id}`)
+  return typeof n === 'number' && n > 0 ? `${id}_${n}` : id
+}
 
 async function log($: EngineInterface, line: string) {
   try {
@@ -333,7 +342,7 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     const checked = markUnverifiedFigures(text, facts)
     if (!problem && checked.flagged.length) await log($, `brief figures not in Handoff Numbers session=${sessionId}: ${checked.flagged.join(', ')}`)
     // Claude Code keeps transcripts under the cwd with every non-alphanumeric character as '-'.
-    const transcript = transcriptPath ?? `~/.claude/projects/${cwd.replace(/[^a-zA-Z0-9]/g, '-')}/${sessionId}.jsonl`
+    const transcript = transcriptPath ?? `~/.claude/projects/${cwd.replace(/[^a-zA-Z0-9]/g, '-')}/${await $.session.id()}.jsonl`
     const brief = assembleBrief({
       sessionId,
       transcript,
@@ -347,21 +356,75 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     await $.fs.write(briefPath, withHeader(header, brief))
     void recordHistory($, history, { at: header.at, session: sessionId, transcript }, problem ? factsBlock(facts) : checked.text, factsDigest(facts))
     const link = await viewer($, briefDir, pagesDir, sessionId)
-    pending = { oldSession: sessionId, briefPath, tokens, chain, link, problem }
-    steps($, [briefStep(problem), { mark: 'spin', text: 'clearing' }])
-    await $.store.set(`fired:${sessionId}`, problem ? `clearing-facts-only:${problem}` : 'clearing')
-    await log($, `brief written ${briefPath} (${brief.length} chars); queueing /clear`)
-    $.command.run({ command: 'clear' }).catch(async (err: unknown) => {
+    const mode = cfg.resetMode
+    pending = { oldSession: sessionId, briefPath, tokens, chain, link, problem, mode }
+    const doing = mode === 'compact' ? 'compacting' : 'clearing'
+    steps($, [briefStep(problem), { mark: 'spin', text: doing }])
+    await $.store.set(`fired:${sessionId}`, problem ? `${doing}-facts-only:${problem}` : doing)
+    await log($, `brief written ${briefPath} (${brief.length} chars); queueing ${mode === 'compact' ? 'the compaction' : '/clear'}`)
+    $.command.run(mode === 'compact' ? { command: 'compact', args: COMPACT_MARK } : { command: 'clear' }).catch(async (err: unknown) => {
       pending = undefined
       // fired stays 'clearing', so this session does not try again; it carries on as it is.
-      failed($, '/clear was rejected', `this session keeps going; the brief is at ${briefPath}`)
-      await log($, `clear rejected ${String(err)}`)
+      failed($, `/${mode} was rejected`, `this session keeps going; the brief is at ${briefPath}`)
+      await log($, `${mode} rejected ${String(err)}`)
     })
   } catch (err) {
     pending = undefined
     // fired stays 'briefing', which tryHandoff treats as an orphan: the next turn tries again.
     failed($, 'no brief written', 'this session keeps going and tries again after the next turn')
     await log($, `handoff error session=${sessionId} ${String(err)}; no clear`)
+  }
+}
+
+// The /compact a compact handoff runs, known by its instructions: the mod's session.compact hook
+// answers it with RESET_NOTE alone, so no summary is written and the model starts from the seed.
+// Run as a command, like /clear: it waits for the session to go idle, and the engine raises the
+// compaction itself, so this plugin's own hook sees it.
+const COMPACT_MARK = '[auto-handoff] reset for a handoff'
+const RESET_NOTE = '[auto-handoff] The conversation before this point was reset for a handoff; the brief follows.'
+
+// Seeds the fresh session or segment `newSession` with a pointer to p's brief, from the
+// SessionStart that follows /clear or /compact.
+async function seed($: EngineInterface, p: Pending, newSession: string) {
+  pending = undefined
+  try {
+    seededSession = newSession
+    floor = undefined
+    unmeasured = 0
+    await $.store.set(`fired:${p.oldSession}`, `seeded:${newSession}`)
+    await log($, `seeding new=${newSession} from=${p.oldSession} mode=${p.mode}`)
+    handedFrom = { session: p.oldSession, tokens: p.tokens, link: p.link, problem: p.problem }
+    steps($, [briefStep(p.problem), { mark: 'done', text: p.mode === 'compact' ? 'compacted' : 'cleared' }, { mark: 'spin', text: 'starting the fresh session' }])
+    const own = await storedLineage($, p.oldSession)
+    const prior = own ? own.depth : 1
+    lineage = { from: p.oldSession, chain: p.chain, depth: prior !== undefined ? prior + 1 : undefined }
+    await $.store.set(`lineage:${newSession}`, lineage)
+    // The reply the old session ended on, after its handoff call: the brief was written before
+    // it, and the clear can take it off the screen. undefined when the tool was not called.
+    const reply = toolReply && (toolReply.after.length ? toolReply.after.join('\n\n') : toolReply.withCall)
+    toolReply = undefined
+    callText = ''
+    // The old brief learns where it went, and its chain's pages link forward.
+    try {
+      const old = parseBrief(await $.fs.read(p.briefPath) as string)
+      const body = reply === undefined ? old.body : `${old.body.trimEnd()}\n\n${replySection(reply)}`
+      // viewer: the page link, read by the status line script for the session it handed off to.
+      await $.fs.write(p.briefPath, withHeader({ ...old.header, to: newSession, ...(p.link ? { viewer: p.link } : {}) }, body))
+      const briefDir = p.briefPath.replace(/\/[^/]+$/, '')
+      await viewer($, briefDir, `${briefDir}/pages`, p.oldSession)
+    } catch (err) {
+      await log($, `viewer forward link failed ${String(err)}`)
+    }
+    // One line on screen; the model reads the brief from disk. A full brief as the
+    // seed showed up as a wall of text the person never wrote.
+    const text = `${SEED_PREFIX} ${short(p.oldSession)}. The previous session hit its context limit and was ${p.mode === 'compact' ? 'reset' : 'cleared'}. Read the brief at ${p.briefPath} before doing anything else${p.link ? ` (readable copy: ${p.link})` : ''} and follow its Instructions section. Open your first reply with the line "↪ Handoff from session ${short(p.oldSession)}".${reply ? `\n\nThe previous session's last reply:\n\n${reply}` : ''}`
+    $.prompt.submit({ text }).catch((err: unknown) => {
+      handedFrom = undefined
+      failed($, 'the seed prompt was rejected', `paste the brief path to carry on: ${p.briefPath}`)
+      return log($, `seed rejected ${String(err)}`)
+    })
+  } catch (err) {
+    await log($, `seed error ${String(err)}`)
   }
 }
 
@@ -510,7 +573,7 @@ let override: { session: string; tokens: number } | undefined
 // on a 200k window.
 async function configured($: EngineInterface): Promise<{ base: number; source: string }> {
   const env = Number(await $.env.get('AUTO_HANDOFF_TOKENS'))
-  const own = override && override.session === await $.session.id() ? override.tokens : undefined
+  const own = override && override.session === await segmentId($) ? override.tokens : undefined
   const { base, source } = own ? { base: own, source: '/handoff in this session' }
     : env > 0 ? { base: env, source: 'AUTO_HANDOFF_TOKENS' }
     : { base: cfg.threshold, source: 'threshold in /config' }
@@ -586,7 +649,7 @@ const HANDOFF_TOOL_SCHEMA = { type: 'object', properties: { brief: { type: 'stri
 async function handoffByTool($: EngineInterface, agentId?: string, brief?: string) {
   if (agentId) return toolAnswer('Not handed off: only the main session hands off.')
   if (inFlight || pending) return toolAnswer('A handoff is already queued; it runs once this turn ends. Carry on.')
-  const sessionId = await $.session.id()
+  const sessionId = await segmentId($)
   const tokens = (await $.session.usage()).context.tokens ?? 0
   if (sessionId === seededSession && floor !== undefined && tokens < floor + MIN_HEADROOM)
     return toolAnswer(`Not handed off: this session started at ${k(floor)} from a handoff and is at ${k(tokens)}. Do more work first.`)
@@ -625,7 +688,7 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'handoff' }, async ($, e) => {
-    const sessionId = await $.session.id()
+    const sessionId = await segmentId($)
     if (e.args.trim()) {
       const n = parseTokens(e.args)
       if (!n) return { text: 'usage: /handoff hands off now; /handoff 60k sets this session\'s threshold' }
@@ -645,7 +708,7 @@ export const register: Register = (on, options) => {
       if (e.agentId || inFlight || pending) return r // subagent turns fire turn.complete too
       const tokens = (await $.session.usage()).context.tokens
       if (tokens === undefined) return r
-      const sessionId = await $.session.id()
+      const sessionId = await segmentId($)
       if (sessionId === seededSession && floor === undefined) {
         // Fallback only: turn.step sets the floor from the seed turn's first response. Reached
         // when that response carried no usage.
@@ -675,7 +738,7 @@ export const register: Register = (on, options) => {
     }
     if (!e.agentId) {
       try {
-        const sessionId = await $.session.id()
+        const sessionId = await segmentId($)
         const tokens = (await $.session.usage()).context.tokens
         const projected = (tokens ?? 0) + unmeasured
         const backstop = await backstopFor($, sessionId)
@@ -694,7 +757,7 @@ export const register: Register = (on, options) => {
     if (typeof r.text === 'string') unmeasured += Math.ceil(r.text.length / CHARS_PER_TOKEN)
     try {
       const tokens = (await $.session.usage()).context.tokens
-      const note = tokens === undefined ? undefined : await nudge($, await $.session.id(), tokens + unmeasured)
+      const note = tokens === undefined ? undefined : await nudge($, await segmentId($), tokens + unmeasured)
       if (note) return { ...r, context: [...(r.context ?? []), note] }
     } catch (err) {
       await log($, `soft line error ${String(err)}`)
@@ -709,7 +772,7 @@ export const register: Register = (on, options) => {
     if (!e.agentId && e.index > 0) {
       try {
         const tokens = (await $.session.usage()).context.tokens
-        const sessionId = await $.session.id()
+        const sessionId = await segmentId($)
         const isSeedTurn = sessionId === seededSession && floor === undefined
         // A handoff already queued (the model's handoff call, mostly) clears once the turn ends, so
         // the turn runs to its end: its tools and its reply. Only the backstop cuts it.
@@ -767,10 +830,13 @@ export const register: Register = (on, options) => {
   // The engine's own auto-compact runs ahead of the turn.step check (live tests 2026-10-03:
   // two compactions, no turn.step line). Catch it here and hand off in its place.
   on('session.compact', async ($, e, next) => {
+    // A compact handoff's own compaction: one line in the transcript's place, no summary.
+    if (e.trigger === 'manual' && !e.agentId && e.instructions?.trim() === COMPACT_MARK && pending?.mode === 'compact')
+      return { messages: [{ role: 'user', text: RESET_NOTE, toolUses: [] }] }
     if (e.trigger !== 'auto' || e.agentId) return next(e)
     if (inFlight || pending) return { skip: 'auto-handoff in progress' }
     try {
-      const sessionId = await $.session.id()
+      const sessionId = await segmentId($)
       const tokens = ((await $.session.usage()).context.tokens ?? 0) + unmeasured
       const threshold = await thresholdFor($, sessionId)
       await log($, `auto-compact session=${sessionId} projected=${tokens}`)
@@ -820,49 +886,14 @@ export const register: Register = (on, options) => {
     }
     // A /clear of the person's own leaves no handoff to report; the panel from the last one goes too.
     if (e.source === 'clear' && !pending && !inFlight && shown) hidePanel($)
-    if (e.source !== 'clear' || !pending) return r
-    const p = pending
-    pending = undefined
-    try {
-      const newSession = await $.session.id()
-      seededSession = newSession
-      floor = undefined
-      unmeasured = 0
-      await $.store.set(`fired:${p.oldSession}`, `seeded:${newSession}`)
-      await log($, `seeding new=${newSession} from=${p.oldSession}`)
-      handedFrom = { session: p.oldSession, tokens: p.tokens, link: p.link, problem: p.problem }
-      steps($, [briefStep(p.problem), { mark: 'done', text: 'cleared' }, { mark: 'spin', text: 'starting the fresh session' }])
-      const own = await storedLineage($, p.oldSession)
-      const prior = own ? own.depth : 1
-      lineage = { from: p.oldSession, chain: p.chain, depth: prior !== undefined ? prior + 1 : undefined }
-      await $.store.set(`lineage:${newSession}`, lineage)
-      // The reply the old session ended on, after its handoff call: the brief was written before
-      // it, and the clear can take it off the screen. undefined when the tool was not called.
-      const reply = toolReply && (toolReply.after.length ? toolReply.after.join('\n\n') : toolReply.withCall)
-      toolReply = undefined
-      callText = ''
-      // The old brief learns where it went, and its chain's pages link forward.
-      try {
-        const old = parseBrief(await $.fs.read(p.briefPath) as string)
-        const body = reply === undefined ? old.body : `${old.body.trimEnd()}\n\n${replySection(reply)}`
-        // viewer: the page link, read by the status line script for the session it handed off to.
-        await $.fs.write(p.briefPath, withHeader({ ...old.header, to: newSession, ...(p.link ? { viewer: p.link } : {}) }, body))
-        const briefDir = p.briefPath.replace(/\/[^/]+$/, '')
-        await viewer($, briefDir, `${briefDir}/pages`, p.oldSession)
-      } catch (err) {
-        await log($, `viewer forward link failed ${String(err)}`)
-      }
-      // One line on screen; the model reads the brief from disk. A full brief as the
-      // seed showed up as a wall of text the person never wrote.
-      const text = `${SEED_PREFIX} ${short(p.oldSession)}. The previous session hit its context limit and was cleared. Read the brief at ${p.briefPath} before doing anything else${p.link ? ` (readable copy: ${p.link})` : ''} and follow its Instructions section. Open your first reply with the line "↪ Handoff from session ${short(p.oldSession)}".${reply ? `\n\nThe previous session's last reply:\n\n${reply}` : ''}`
-      $.prompt.submit({ text }).catch((err: unknown) => {
-        handedFrom = undefined
-        failed($, 'the seed prompt was rejected', `paste the brief path to carry on: ${p.briefPath}`)
-        return log($, `seed rejected ${String(err)}`)
-      })
-    } catch (err) {
-      await log($, `seed error ${String(err)}`)
+    if (!pending || e.source !== pending.mode) return r
+    if (pending.mode === 'compact') {
+      // The same engine session goes on: the next segment of it is the fresh session.
+      const id = await $.session.id()
+      const n = await $.store.get(`segment:${id}`)
+      await $.store.set(`segment:${id}`, (typeof n === 'number' ? n : 0) + 1)
     }
+    await seed($, pending, await segmentId($))
     return r
   })
 }
