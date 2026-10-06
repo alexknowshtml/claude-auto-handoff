@@ -712,13 +712,25 @@ describe('auto-handoff', () => {
     await ui.unmount()
   })
 
-  test('past the threshold, tool calls are refused before they run', async ($, on) => {
+  test('past the threshold the turn goes on, and hands off when it ends', async ($, on) => {
+    const calls = engine(on, { tokens: 100_000, env: { AUTO_HANDOFF_TOKENS: '80000' }, toolChars: 4_000 })
+    await $.tool.call({ tool: 'Read', file_path: '/a.txt' })
+    await step($)
+    expect(calls.ran).toBe(1)
+    expect(calls.steps).toBe(1)
+    expect(calls.cleared).toBe(0)
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    expect(calls.cleared).toBe(1)
+  })
+
+  test('near the window, tool calls are refused before they run', async ($, on) => {
     // Seen live: ~28 reads in one step took the session from 67k to 437k.
     const calls = engine(on, { tokens: 67_000, env: { AUTO_HANDOFF_TOKENS: '80000' }, toolChars: 220_000 })
     const results = []
     for (let i = 0; i < 28; i++) results.push(await $.tool.call({ tool: 'Read', file_path: `/export-${i}.txt` }))
-    expect(calls.ran).toBe(1) // 67k + 55k crosses 80k after the first read
-    expect(results.slice(1).every(r => 'deny' in r && r.deny?.includes('[auto-handoff] Not run'))).toBe(true)
+    expect(calls.ran).toBe(2) // 55k a read: 122k is under the 160k backstop (200k window less 40k), 177k is not
+    expect(results.slice(2).every(r => 'deny' in r && r.deny?.includes('[auto-handoff] Not run'))).toBe(true)
     expect(calls.cleared).toBe(0) // the refusal does not hand off by itself
 
     await step($)
@@ -730,7 +742,7 @@ describe('auto-handoff', () => {
 
   test('a refused tool call hands off at turn end even when the real size comes in under the threshold', async ($, on) => {
     // Seen live: the gate projected 83.7k, the response measured 72.5k, and the session stopped with no handoff.
-    const calls = engine(on, { tokens: 67_000, env: { AUTO_HANDOFF_TOKENS: '80000' }, toolChars: 220_000 })
+    const calls = engine(on, { tokens: 67_000, env: { AUTO_HANDOFF_TOKENS: '80000' }, toolChars: 400_000 })
     await $.tool.call({ tool: 'Read', file_path: '/a.txt' })
     const refused = await $.tool.call({ tool: 'Read', file_path: '/b.txt' })
     expect('deny' in refused && refused.deny?.includes('[auto-handoff] Not run')).toBe(true)
@@ -741,14 +753,14 @@ describe('auto-handoff', () => {
   })
 
   test('a refused tool call hands off at the next request, and the stop line does not claim a size under the threshold', async ($, on) => {
-    const calls = engine(on, { tokens: 84_000, env: { AUTO_HANDOFF_TOKENS: '80000' } })
+    const calls = engine(on, { tokens: 165_000, env: { AUTO_HANDOFF_TOKENS: '80000' } })
     const refused = await $.tool.call({ tool: 'Read', file_path: '/a.txt' })
     expect('deny' in refused).toBe(true)
     calls.tokens = 72_500 // the next measurement comes in under the threshold
     const chunks = await step($)
     expect(calls.steps).toBe(0)
     const text = chunks.map(c => c.text ?? '').join('')
-    expect(text).toContain('A tool call was refused at the handoff threshold (80k)')
+    expect(text).toContain('A tool call was refused near the context limit (160k)')
     expect(text).not.toContain('would carry')
     await settle(() => calls.cleared > 0)
     expect(calls.cleared).toBe(1)

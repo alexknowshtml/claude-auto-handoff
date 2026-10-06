@@ -525,6 +525,15 @@ async function thresholdFor($: EngineInterface, sessionId: string): Promise<numb
   return sessionId === seededSession ? Math.max(base, (floor ?? 0) + MIN_HEADROOM) : base
 }
 
+// The threshold hands off when the turn ends, so a long turn can finish its answer. Mid-turn,
+// only this backstop stops it: the window less WINDOW_RESERVE, or the threshold when the
+// window is unknown.
+async function backstopFor($: EngineInterface, sessionId: string): Promise<number> {
+  const threshold = await thresholdFor($, sessionId)
+  const window = (await $.session.usage()).context.window
+  return typeof window === 'number' && window > WINDOW_RESERVE * 2 ? Math.max(threshold, window - WINDOW_RESERVE) : threshold
+}
+
 // Past the soft line the model is asked to hand off at its next boundary. Never below the point a
 // seeded session's handoff tool would refuse.
 async function softLine($: EngineInterface, sessionId: string): Promise<number> {
@@ -667,11 +676,11 @@ export const register: Register = (on, options) => {
         const sessionId = await $.session.id()
         const tokens = (await $.session.usage()).context.tokens
         const projected = (tokens ?? 0) + unmeasured
-        const threshold = await thresholdFor($, sessionId)
-        if (inFlight || pending || (tokens !== undefined && projected >= threshold && await canHandOff($, sessionId))) {
+        const backstop = await backstopFor($, sessionId)
+        if (inFlight || pending || (tokens !== undefined && projected >= backstop && await canHandOff($, sessionId))) {
           if (!inFlight && !pending) gated = sessionId
-          await log($, `tool refused session=${sessionId} tool=${e.tool} projected=${projected} threshold=${threshold}`)
-          return { deny: `[auto-handoff] Not run: the context is past the handoff threshold (${k(projected)} ≥ ${k(threshold)}). This session is handing off to a fresh one, which will redo this call. Make no more tool calls.` }
+          await log($, `tool refused session=${sessionId} tool=${e.tool} projected=${projected} backstop=${backstop}`)
+          return { deny: `[auto-handoff] Not run: the context is near its limit (${k(projected)} ≥ ${k(backstop)}). This session is handing off to a fresh one, which will redo this call. Make no more tool calls.` }
         }
       } catch (err) {
         await log($, `tool.call gate error ${String(err)}`)
@@ -714,13 +723,14 @@ export const register: Register = (on, options) => {
         if (tokens !== undefined && !isSeedTurn) {
           const projected = tokens + unmeasured
           const threshold = await thresholdFor($, sessionId)
+          const backstop = await backstopFor($, sessionId)
           const isGated = gated === sessionId
-          if ((projected >= threshold || isGated) && await tryHandoff($, sessionId, projected, threshold, `turn.step measured=${tokens}${isGated ? ' gated' : ''}`)) {
+          if ((projected >= backstop || isGated) && await tryHandoff($, sessionId, projected, threshold, `turn.step measured=${tokens}${isGated ? ' gated' : ''}`)) {
             unmeasured = 0
-            // A gated session can measure under the threshold here; "would carry" a number below it reads as a bug.
-            const why = projected >= threshold
-              ? `The next request would carry about ${Math.round(projected / 1000)}k tokens (threshold ${Math.round(threshold / 1000)}k).`
-              : `A tool call was refused at the handoff threshold (${Math.round(threshold / 1000)}k).`
+            // A gated session can measure under the backstop here; "would carry" a number below it reads as a bug.
+            const why = projected >= backstop
+              ? `The next request would carry about ${Math.round(projected / 1000)}k tokens (limit ${Math.round(backstop / 1000)}k).`
+              : `A tool call was refused near the context limit (${Math.round(backstop / 1000)}k).`
             yield { kind: 'text', index: 0, text: `[auto-handoff] ${why} Stopping this turn to hand off to a fresh session.` }
             yield { kind: 'stop', stopReason: 'end_turn', usage: null }
             return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage: null }
