@@ -3,12 +3,18 @@ import { renderTemplate, sectionHeadings } from './templates.ts'
 
 // Brief building.
 // Files, commits, issues and the last real request come from the transcript in code;
-// Haiku only writes the judgment sections. Its reply is checked, and the facts alone
-// stand in when it fails.
+// a model only writes the judgment sections: the session's own model through a fork, which
+// reads the whole conversation from its cache, else Haiku from a rendered copy of its tail.
+// The reply is checked, and the facts alone stand in when it fails.
 
 const MAX_MESSAGES = 120
 const MAX_MSG_CHARS = 2_000
+// A tool's output as Haiku reads it: the head and the tail, so an error at the end survives.
+const MAX_TOOL_CHARS = 800
 const MAX_TRANSCRIPT_CHARS = 150_000
+// The brief this session started from, read from disk: the seed turn's read of it has usually
+// left the last MAX_MESSAGES by the time this session hands off.
+const MAX_PREVIOUS_CHARS = 40_000
 
 // Harness signals that arrive as user messages but are never the user's words.
 const META_PREFIXES = ['Stop hook feedback', '[Automatic handoff]', '[auto-handoff]', '[Image', '<system-reminder>', '<command-name>', '<local-command']
@@ -30,6 +36,32 @@ export type Facts = {
   unattendedCount?: number
   /** Which handoff this is in its chain (1 for the first, 2 for the second, etc.). */
   depth?: number
+  /** What started the handoff: the threshold, the handoff tool, or /handoff. */
+  trigger?: string
+  /** `git status --porcelain` lines of the session's repo; undefined when git was not asked. */
+  uncommitted?: string[]
+}
+
+const commitSha = (c: string) => c.match(/\(([0-9a-f]{7,})\)$/)?.[1]?.slice(0, 7)
+
+/** Merges what git says into the transcript's facts. The transcript only sees Edit/Write calls and
+ * git's "[branch sha]" line, so a file edited through Bash, or a `git commit -q`, never reached the
+ * brief. log: `git log --format=%x00%h %s --name-only` since the session (or its segment) began;
+ * status: `git status --porcelain`; root: the repo's top level, for absolute paths. */
+export function mergeGitFacts(facts: Facts, root: string, log: string, status: string): Facts {
+  const files = new Set(facts.filesModified)
+  const fromGit: string[] = []
+  for (const block of log.split('\0').slice(1)) {
+    const [head = '', ...names] = block.split('\n')
+    const m = head.match(/^([0-9a-f]{7,}) (.*)$/)
+    if (m) fromGit.push(`${m[2]} (${m[1]})`)
+    for (const n of names) if (n.trim()) files.add(`${root}/${n.trim()}`)
+  }
+  const known = new Set(fromGit.map(commitSha))
+  // Oldest first, like the transcript's; a transcript commit git did not list (another repo) stays.
+  const commits = [...facts.commits.filter(c => !known.has(commitSha(c))), ...fromGit.reverse()]
+  const uncommitted = status.split('\n').map(l => l.trimEnd()).filter(Boolean)
+  return { ...facts, filesModified: [...files].slice(-30), commits: commits.slice(-15), uncommitted: uncommitted.slice(0, 30) }
 }
 
 /** The user's own words, or undefined for a harness signal or a tool-result-only message. */
@@ -74,12 +106,24 @@ export function extractFacts(messages: readonly SessionMessage[], ignoreFiles?: 
   return { filesModified: [...files].slice(-20), commits: commits.slice(-10), issues: [...issues].slice(-15), lastUserMessage }
 }
 
-/** The transcript as Haiku reads it. Harness signals are labelled so they are not taken for the user. */
+/** Head and tail of a long text, cut marked. */
+function clip(text: string, max: number): string {
+  if (text.length <= max) return text
+  const head = Math.floor(max * 0.75)
+  return `${text.slice(0, head)} […] ${text.slice(text.length - (max - head))}`
+}
+
+/** The transcript as Haiku reads it: each call with what it returned. Harness signals are
+ * labelled so they are not taken for the user. */
 export function renderTranscript(messages: readonly SessionMessage[]): string {
   const lines = messages.slice(-MAX_MESSAGES).map(m => {
     const role = m.role === 'user' && m.text.trim() && !userText(m) ? 'system signal (not the user)' : m.role
     const text = m.text.length > MAX_MSG_CHARS ? m.text.slice(0, MAX_MSG_CHARS) + ' [truncated]' : m.text
-    const tools = m.toolUses.map(t => `  [tool ${t.tool}${t.isError ? ' ERROR' : ''}] ${JSON.stringify(t.input).slice(0, 300)}`)
+    const tools = m.toolUses.map(t => {
+      const call = `  [tool ${t.tool}${t.isError ? ' ERROR' : ''}] ${JSON.stringify(t.input).slice(0, 300)}`
+      const out = t.text?.trim()
+      return out ? `${call}\n  → ${clip(out, MAX_TOOL_CHARS)}` : call
+    })
     return [`### ${role}`, text, ...tools].filter(Boolean).join('\n')
   })
   const joined = lines.join('\n\n')
@@ -95,6 +139,7 @@ function list(items: string[], empty: string): string {
 function handoffNumbersBlock(f: Facts): string {
   const lines = []
   if (f.depth !== undefined) lines.push(`- **Handoff depth:** ${f.depth}`)
+  if (f.trigger) lines.push(`- **Trigger:** ${f.trigger}`)
   if (f.handoffTokens !== undefined) lines.push(`- **Tokens at handoff:** ${f.handoffTokens} (${k(f.handoffTokens)})`)
   if (f.threshold !== undefined) lines.push(`- **Threshold:** ${f.threshold} (${k(f.threshold)})${f.thresholdSource ? `, from ${f.thresholdSource}` : ''}`)
   if (f.seededSessionStartSize !== undefined) lines.push(`- **This session's starting size (seeded from a handoff):** ${f.seededSessionStartSize} (${k(f.seededSessionStartSize)})`)
@@ -106,21 +151,56 @@ const k = (n: number) => `${Math.round(n / 1000)}k`
 
 export function factsBlock(f: Facts, withLastMessage = true): string {
   const numbers = handoffNumbersBlock(f)
-  const files = `## Files Modified (from Edit/Write calls)
+  const files = `## Files Modified (Edit/Write calls and this session's commits)
 ${list(f.filesModified, 'None.')}
 
 ## Commits This Session
 ${list(f.commits, 'None.')}
-
+${f.uncommitted ? `\n## Uncommitted Changes (git status)\n${list(f.uncommitted, 'None: the tree is clean.')}\n` : ''}
 ## GitHub Issues Mentioned
 ${f.issues.length ? f.issues.join(', ') : 'None.'}`
   const all = [numbers, files].filter(Boolean).join('\n')
   return withLastMessage ? `${all}\n\n## Last Real User Message (verbatim)\n${f.lastUserMessage ?? 'None found.'}` : all
 }
 
-export function briefPrompt(messages: readonly SessionMessage[], facts: Facts, template: string): string {
+// Its headings drop a level, so they cannot be read as sections of the brief being written.
+function previousBlock(previous: string | undefined, where: string): string {
+  return previous?.trim()
+    ? `## Previous Brief\nThe brief this session started from. Carry forward whatever in it is still relevant and was not settled in ${where}: the goal, decisions, dead ends, open questions.\n\n${clip(previous.trim(), MAX_PREVIOUS_CHARS).replace(/^(#{2,5}) /gm, '#$1 ')}\n\n`
+    : ''
+}
+
+/** previous: the body of the brief this session started from, when it was seeded by a handoff. */
+export function briefPrompt(messages: readonly SessionMessage[], facts: Facts, template: string, previous?: string): string {
   // Data first, instructions last.
-  return `## Extracted Facts\n${factsBlock(facts)}\n\n## Conversation\n${renderTranscript(messages)}\n\n---\n\n${template.trim()}`
+  return `## Extracted Facts\n${factsBlock(facts)}\n\n${previousBlock(previous, 'the conversation below')}## Conversation\n${renderTranscript(messages)}\n\n---\n\n${template.trim()}`
+}
+
+/** The template from its first section on: its preamble is written for Haiku reading a rendered transcript. */
+export function briefSections(template: string): string {
+  const at = template.search(/^## /m)
+  return (at >= 0 ? template.slice(at) : template).trim()
+}
+
+/** The fork's one message, after the session's own transcript: no rendered copy of it. */
+export function forkPrompt(facts: Facts, template: string, previous?: string): string {
+  return `[auto-handoff] This session is at its context limit and will be cleared. Write a handoff brief for a fresh session that will see none of this conversation. Reply with the brief's sections as text only: call no tools, and do not continue the work. Copy any token figure from Handoff Numbers below; never estimate one. Files and commits are added from the facts: leave them out.\n\n## Extracted Facts\n${factsBlock(facts)}\n\n${previousBlock(previous, 'this conversation')}---\n\n${briefSections(template)}`
+}
+
+/**
+ * Read by the model after a tool result once the context passes the soft line: hand off at the
+ * next boundary, the brief as the handoff tool's argument. Written inside a request the session
+ * was making anyway, the brief costs its output tokens and nothing more.
+ */
+export function softNote(tool: string, tokens: number, threshold: number, template: string): string {
+  return `[auto-handoff] Context is at about ${k(tokens)} tokens; this session hands off at ${k(threshold)}. Carry on with your work exactly as you would otherwise: do not wrap up, and do not tell the user what you have done or what the next session will do. At your next pause between steps, call ${tool} with \`brief\`: a handoff brief for a fresh session that will see none of this conversation, then carry on. The reset waits for the turn to end. Use these sections in this order, omitting empty ones. State no token counts and list no files or commits: code adds those. In "Last Request from the User", mark it Answered only if a reply the user can already see answers it.\n\n${briefSections(template)}`
+}
+
+/** The brief's closing section: what the user last saw, so the next session does not redo it. */
+export function replySection(reply: string): string {
+  return reply
+    ? `## Final Reply Shown to the User\nThe previous session's last reply, verbatim. Where it answers the Last Request, that request is answered: do not answer it again.\n\n${reply}\n`
+    : `## Final Reply Shown to the User\nThe previous session's final response called the handoff tool with no reply text. Go by the Last Request status above.\n`
 }
 
 /** A reply that holds none of the template's sections is a dialogue fragment, not a brief. */
@@ -146,9 +226,12 @@ export type BriefContext = {
   transcript: string
   /** The instructions template, rendered at the top of the brief. */
   instructions: string
+  /** Who wrote the judgment sections: the model in its handoff call, a fork of it, or Haiku. */
+  writer?: 'tool' | 'fork' | 'haiku'
 }
 
-export function assembleBrief(ctx: BriefContext, facts: Facts, haiku: string | undefined): string {
+/** history: the Project History section (history.ts), or '' for none. */
+export function assembleBrief(ctx: BriefContext, facts: Facts, haiku: string | undefined, history = ''): string {
   const header = `${renderTemplate(ctx.instructions, { priority: haiku ? hasUnansweredLastRequest(haiku) : false })}
 
 ## Session Handoff Brief
@@ -157,9 +240,9 @@ export function assembleBrief(ctx: BriefContext, facts: Facts, haiku: string | u
 - **Transcript:** \`${ctx.transcript}\`
 
 ## How to Use This Brief
-${haiku ? 'Haiku wrote the judgment sections from conversation text with tool output abbreviated. The facts sections came from tool calls in code.' : 'Haiku did not return a usable brief, so this holds only facts extracted in code. Read the transcript for the rest.'} Treat every line as a starting point, not a fact. Before acting on anything here, spawn a subagent to verify: run git status, gh pr view, or Read the file directly. If a fact is missing, grep the transcript before asking the user.`
+${!haiku ? 'The brief writer did not return a usable brief, so this holds only facts extracted in code. Read the transcript for the rest.' : ctx.writer === 'tool' || ctx.writer === 'fork' ? "The session's own model wrote the judgment sections with the whole conversation in view, plus the brief this session started from. The facts sections came from tool calls in code." : 'Haiku wrote the judgment sections from the conversation, tool output abbreviated, and the brief this session started from. The facts sections came from tool calls in code.'} Treat every line as a starting point, not a fact. If a fact is missing, grep the transcript before asking the user.`
   // A valid Haiku brief already quotes the last request in its own section.
-  return [header, haiku?.trim(), factsBlock(facts, !haiku)].filter(Boolean).join('\n\n')
+  return [header, haiku?.trim(), factsBlock(facts, !haiku), history].filter(Boolean).join('\n\n')
 }
 
 // A token figure: "93k", "93.1k", "93,105 tokens", "93105 tokens".

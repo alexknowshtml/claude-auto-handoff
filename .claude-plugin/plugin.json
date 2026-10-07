@@ -1,7 +1,7 @@
 {
   "name": "auto-handoff",
-  "version": "0.8.6",
-  "description": "Hands a Claude Code session off to a fresh one before the context fills: a Haiku-written brief, /clear, and a seed that points the new session at the brief.",
+  "version": "0.10.0",
+  "description": "Hands a Claude Code session off to a fresh one before the context fills: a Haiku-written brief that carries the previous brief and the project history, /clear, and a seed that points the new session at the brief. Also on request: /handoff, or the handoff tool.",
   "author": {
     "name": "Alex Hillman",
     "url": "https://github.com/alexknowshtml"
@@ -11,9 +11,9 @@
   "userConfig": {
     "threshold": {
       "type": "number",
-      "title": "Handoff threshold (tokens)",
-      "description": "Context size that triggers a handoff. AUTO_HANDOFF_TOKENS overrides it for a test run. A seeded session hands off no sooner than 40k past its starting size; the panel above the prompt says so when this is set lower.",
-      "default": 160000
+      "title": "Handoff threshold (tokens); handoffs come from 20k below it",
+      "description": "Context size that triggers a handoff. In practice handoffs happen about 20k below it: there the model is asked to finish its step and hand off with its own brief. The 220k default trades some of the measured saving for more work between handoffs (see config.ts). Never closer than 40k to the context window, so a 300k setting becomes 160k on a 200k window. AUTO_HANDOFF_TOKENS overrides it for a test run, and /handoff 60k for one session. A seeded session hands off no sooner than 40k past its starting size; the panel above the prompt says so when this is set lower.",
+      "default": 220000
     },
     "maxConsecutiveHandoffs": {
       "type": "number",
@@ -42,8 +42,26 @@
     "viewer": {
       "type": "string",
       "title": "Viewer address",
-      "description": "Where the mod serves a readable page for each brief, as host:port. \"tailscale\" as the host means this machine's Tailscale IP, so only your tailnet can open it; without Tailscale it serves on 127.0.0.1. Leave blank for no server; the link is then the local file.",
-      "default": "tailscale:3846"
+      "description": "Where the mod serves a readable page for each brief, as host:port. \"tailscale\" as the host means this machine's Tailscale IP (tailscale:3846), so only your tailnet can open it; without Tailscale it serves on 127.0.0.1. Blank, the default: no server, and the link is the local file.",
+      "default": ""
+    },
+    "historyLines": {
+      "type": "number",
+      "title": "Project history lines",
+      "description": "How many lines of project history a brief carries: recent sessions whole, older ones merged. About 150 tokens a line at most; the full log stays on disk for the next session to grep.",
+      "default": 8
+    },
+    "briefWriter": {
+      "type": "string",
+      "title": "Brief writer",
+      "description": "fork: the session's own model writes the brief over its cached transcript and sees the whole session (better carryover; billed as cache reads plus its output). haiku: Haiku writes it from the last 120 messages (cheaper). A failed fork falls back to Haiku.",
+      "default": "fork"
+    },
+    "resetMode": {
+      "type": "string",
+      "title": "Reset mode",
+      "description": "clear: /clear starts a fresh session, and the earlier messages leave the screen. compact: the conversation is compacted down to one line, so the model starts from the brief while the screen keeps every earlier message.",
+      "default": "compact"
     }
   }
 }
