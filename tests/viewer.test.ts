@@ -43,6 +43,7 @@ Test it.`
   test('viewerLink is the short served link, or the local file with no server', () => {
     expect(viewerLink({ host: '100.64.0.1', port: '3846' }, '/pages', 'abc12345')).toBe('http://100.64.0.1:3846/abc12345')
     expect(viewerLink(undefined, '/pages', 'abc12345')).toBe('file:///pages/abc12345.html')
+    expect(viewerLink(undefined, 'C:\\Users\\x/.claude/pages', 'abc12345')).toBe('file:///C:/Users/x/.claude/pages/abc12345.html')
   })
 
   test('renderPage links the chain and escapes a brief that tries to close the script tag', () => {
