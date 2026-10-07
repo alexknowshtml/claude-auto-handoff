@@ -73,10 +73,29 @@ async function segmentId($: EngineInterface): Promise<string> {
   return typeof n === 'number' && n > 0 ? `${id}_${n}` : id
 }
 
+// Windows sets USERPROFILE, not HOME. With HOME unset, every path built on it began with
+// "undefined/", which $.fs resolves under the session's working directory: briefs, templates
+// and pages landed inside the user's project.
+async function homeDir($: EngineInterface): Promise<string | undefined> {
+  return (await $.env.get('HOME')) || (await $.env.get('USERPROFILE'))
+}
+
 async function log($: EngineInterface, line: string) {
   try {
-    const home = await $.env.get('HOME')
-    await $.process.run(['sh', '-c', 'mkdir -p "$(dirname "$2")" && printf "%s\\n" "$1" >> "$2"', 'sh', `${new Date().toISOString()} ${line}`, `${home}/${BRIEF_DIR}/auto-handoff.log`])
+    const path = `${await homeDir($)}/${BRIEF_DIR}/auto-handoff.log`
+    const stamped = `${new Date().toISOString()} ${line}`
+    // Where there is a `sh`, append: an append is atomic, so concurrent sessions and the viewer
+    // server (which appends its own output here) never drop each other's lines.
+    try {
+      const { exitCode } = await $.process.run(['sh', '-c', 'mkdir -p "$(dirname "$2")" && printf "%s\\n" "$1" >> "$2"', 'sh', stamped, path])
+      if (exitCode === 0) return
+    } catch {}
+    // Windows has no `sh`. $.fs has no append, so the log is read and rewritten: two lines logged
+    // at the same instant can lose one. It keeps the last ~500 KB, cut at a line, so a read never
+    // hits $.fs's 4 MiB cap.
+    const old = await $.fs.read(path).catch(() => '')
+    const kept = typeof old !== 'string' ? '' : old.length > 1_000_000 ? old.slice(old.indexOf('\n', old.length - 500_000) + 1) : old
+    await $.fs.write(path, `${kept}${stamped}\n`)
   } catch {}
 }
 
@@ -92,13 +111,13 @@ const shipped = ($: EngineInterface, key: TemplateKey) => `${$.plugin.root}/temp
 
 // The template file at its configured path, else the default the mod ships, else ''.
 async function template($: EngineInterface, key: TemplateKey): Promise<string> {
-  return await readText($, expand(cfg[key], await $.env.get('HOME') ?? '')) ?? await readText($, shipped($, key)) ?? ''
+  return await readText($, expand(cfg[key], await homeDir($) ?? '')) ?? await readText($, shipped($, key)) ?? ''
 }
 
 // A new session writes each template to its path if nothing is there yet, so the files exist
 // to be edited. A file the user wrote is never touched.
 async function writeMissingTemplates($: EngineInterface) {
-  const home = await $.env.get('HOME') ?? ''
+  const home = await homeDir($) ?? ''
   for (const [key] of TEMPLATES) {
     const path = expand(cfg[key], home)
     try { await $.fs.read(path); continue } catch {}
@@ -127,15 +146,19 @@ let lastServeTry = 0
 // Starts the server detached (setsid, else nohup), so the pages stay served after this session
 // exits: a brief's link is opened later, often from a phone, long after the handoff. When a
 // server already holds the port, the new child exits at once, so a launch is safe to repeat.
-// Its output goes to the mod's log.
-async function launchServer($: EngineInterface, pagesDir: string, addr: { host: string; port: string }) {
+// Its output goes to the mod's log. Answers whether the launch ran: it needs `sh`, which Windows
+// lacks, and then the link falls back to the local file.
+async function launchServer($: EngineInterface, pagesDir: string, addr: { host: string; port: string }): Promise<boolean> {
   try {
-    const home = await $.env.get('HOME')
-    await $.process.run(['sh', '-c', 'mkdir -p "$1"; if command -v setsid >/dev/null 2>&1; then d=setsid; else d=nohup; fi; $d node -e "$2" "$1" "$3" "$4" >>"$5" 2>&1 </dev/null &',
+    const home = await homeDir($)
+    const { exitCode } = await $.process.run(['sh', '-c', 'mkdir -p "$1"; if command -v setsid >/dev/null 2>&1; then d=setsid; else d=nohup; fi; $d node -e "$2" "$1" "$3" "$4" >>"$5" 2>&1 </dev/null &',
       'sh', pagesDir, SERVER_JS, addr.host, addr.port, `${home}/${BRIEF_DIR}/auto-handoff.log`])
+    if (exitCode === 0) return true
+    await log($, `viewer server failed exit=${exitCode}`)
   } catch (err) {
     await log($, `viewer server failed ${String(err)}`)
   }
+  return false
 }
 
 // Brings the server back if it died (a reboot, a crash). Called on startup and after each turn,
@@ -145,7 +168,7 @@ async function keepServing($: EngineInterface) {
   if (Date.now() - lastServeTry < 300_000) return
   lastServeTry = Date.now()
   const addr = await serveAddress($)
-  const home = await $.env.get('HOME')
+  const home = await homeDir($)
   if (addr && home) await launchServer($, `${home}/${BRIEF_DIR}/pages`, addr)
 }
 
@@ -172,11 +195,11 @@ async function writeChainPages($: EngineInterface, briefDir: string, pagesDir: s
 // link, or '' when the pages could not be written. Never throws: the viewer is not the handoff.
 async function viewer($: EngineInterface, briefDir: string, pagesDir: string, sessionId: string): Promise<string> {
   try {
-    await $.process.run(['mkdir', '-p', pagesDir])
+    // $.fs.write creates pagesDir, so no `mkdir`: a subprocess Windows can't run.
     await writeChainPages($, briefDir, pagesDir, sessionId)
     const addr = await serveAddress($)
-    if (addr) await launchServer($, pagesDir, addr)
-    return viewerLink(addr, pagesDir, sessionId)
+    const served = addr && await launchServer($, pagesDir, addr)
+    return viewerLink(served ? addr : undefined, pagesDir, sessionId)
   } catch (err) {
     await log($, `viewer error session=${sessionId} ${String(err)}`)
     return ''
@@ -336,7 +359,7 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
   try {
     const own = sessionId === seededSession && lineage ? lineage : await storedLineage($, sessionId)
     const messages = await $.session.messages()
-    const home = await $.env.get('HOME') ?? ''
+    const home = await homeDir($) ?? ''
     const cwd = await $.session.cwd()
     const briefDir = `${home}/${BRIEF_DIR}`
     // Since this session began, or since the handoff that seeded it: a compact handoff keeps the
@@ -684,7 +707,7 @@ async function handoffByTool($: EngineInterface, agentId?: string, brief?: strin
 async function catchUpHistory($: EngineInterface) {
   try {
     if (await paneVar($)) return
-    const h = await projectHistory($, await $.env.get('HOME') ?? '', await $.session.cwd())
+    const h = await projectHistory($, await homeDir($) ?? '', await $.session.cwd())
     if (h.entries.length > 1) await compressPending($, h)
   } catch (err) {
     await log($, `history catch-up error ${String(err)}`)

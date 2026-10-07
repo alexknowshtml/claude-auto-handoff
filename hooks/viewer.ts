@@ -50,7 +50,10 @@ export function chainOf(entries: readonly Entry[], id: string): Entry[] {
 /** The page's address: served when the mod runs a server, else the local file. The served link
  * uses the session id's first 8 characters, short enough to stay on one line on a phone. */
 export function viewerLink(serve: { host: string; port: string } | undefined, pagesDir: string, sessionId: string): string {
-  return serve ? `http://${serve.host}:${serve.port}/${short(sessionId)}` : `file://${pagesDir}/${sessionId}.html`
+  if (serve) return `http://${serve.host}:${serve.port}/${short(sessionId)}`
+  // A Windows path (C:\Users\x) becomes file:///C:/Users/x; a POSIX path passes through.
+  const dir = pagesDir.replace(/\\/g, '/').replace(/^(?=[A-Za-z]:)/, '/')
+  return `file://${dir}/${sessionId}.html`
 }
 
 // Sections meant for the fresh session, not for a person reading the page.

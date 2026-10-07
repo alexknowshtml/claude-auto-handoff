@@ -56,8 +56,14 @@ const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, c
 // The test runs under bun, which has timers; the hooks lib (es2023, no DOM) does not declare them.
 declare const setTimeout: (fn: (...args: never[]) => void, ms: number) => unknown
 
+// On Windows the engine hands fs hooks "/home/test/x" as "D:\home\test\x";
+// the fake file store keys on the POSIX spelling either way.
+const posix = (p: string) => p.replace(/^[A-Za-z]:/, '').replace(/\\/g, '/')
+// The mod's log lands in the fake file store too (sh append or fs.write); assertions about the files a handoff writes skip it.
+const files = (written: Record<string, string>) => Object.keys(written).filter(p => !p.endsWith('/auto-handoff.log'))
+
 // The engine beneath the plugin: everything the mod calls, answered from memory.
-function engine(on: On, opts: { tokens: number; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[]; window?: number; fork?: string | null | Error; answer?: string; callsHandoff?: boolean; git?: { log: string; status: string } }): Calls {
+function engine(on: On, opts: { tokens: number; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[]; window?: number; fork?: string | null | Error; answer?: string; callsHandoff?: boolean; git?: { log: string; status: string }; noSh?: boolean }): Calls {
   const calls: Calls = { compacts: 0, compactRuns: [], steps: 0, cleared: 0, seeded: [], written: {}, completes: 0, tokens: opts.tokens, prompts: [], toasts: [], ran: 0, history: [], forks: [] }
   let sessionId = 'old-session'
   let clears = 0
@@ -74,10 +80,11 @@ function engine(on: On, opts: { tokens: number; files?: Record<string, string>; 
   on('session.id', async () => ({ value: sessionId }))
   on('session.cwd', async () => ({ value: '/home/test/proj' }))
   on('fs.read', async (_$, e) => {
-    const text = calls.written[e.path] ?? opts.files?.[e.path]
+    const path = posix(e.path)
+    const text = calls.written[path] ?? opts.files?.[path]
     // The shipped defaults: the real files in the mod's templates/ folder.
-    if (text === undefined && e.path.endsWith("/templates/brief.md")) return { value: SHIPPED_BRIEF }
-    if (text === undefined && e.path.endsWith("/templates/instructions.md")) return { value: SHIPPED_INSTRUCTIONS }
+    if (text === undefined && path.endsWith("/templates/brief.md")) return { value: SHIPPED_BRIEF }
+    if (text === undefined && path.endsWith("/templates/instructions.md")) return { value: SHIPPED_INSTRUCTIONS }
     if (text === undefined) throw new Error(`ENOENT ${e.path}`)
     return { value: text }
   })
@@ -107,15 +114,24 @@ function engine(on: On, opts: { tokens: number; files?: Record<string, string>; 
     }
   })
   on('fs.write', async (_$, e) => {
-    calls.written[e.path] = e.text
+    calls.written[posix(e.path)] = e.text
     return { value: undefined }
   })
-  on('fs.list', async (_$, e) => ({
-    value: Object.keys(calls.written).filter(p => p.startsWith(`${e.path}/`) && !p.slice(e.path.length + 1).includes('/'))
-      .map(p => ({ name: p.slice(e.path.length + 1), kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false })),
-  }))
+  on('fs.list', async (_$, e) => {
+    const dir = posix(e.path)
+    return {
+      value: Object.keys(calls.written).filter(p => p.startsWith(`${dir}/`) && !p.slice(dir.length + 1).includes('/'))
+        .map(p => ({ name: p.slice(dir.length + 1), kind: 'file' as const, size: 0, mtimeMs: 0, isLink: false })),
+    }
+  })
   // git: the session's repo at /home/test/proj, answered by subcommand; otherwise every process prints nothing.
   on('process.run', async (_$, e) => {
+    // No `sh`, as on Windows: every sh call refused. The log's `sh` append is kept in the file store.
+    if (opts.noSh && e.argv[0] === 'sh') throw new Error('ENOENT sh')
+    if (e.argv[0] === 'sh' && e.argv[2]?.includes('>> "$2"')) {
+      const path = posix(e.argv[5] ?? '')
+      calls.written[path] = `${calls.written[path] ?? ''}${e.argv[4]}\n`
+    }
     const sub = e.argv[0] === 'git' ? e.argv[3] : undefined
     const stdout = !opts.git || !sub ? '' : sub === 'rev-parse' ? '/home/test/proj\n' : sub === 'log' ? opts.git.log : sub === 'status' ? opts.git.status : ''
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -206,8 +222,12 @@ describe('auto-handoff', () => {
     await $.turn.complete(TURN)
     await settle(() => calls.cleared > 0)
     expect(calls.completes).toBe(1)
-    expect(Object.keys(calls.written).filter(p => !p.includes('/history/'))).toEqual(['/home/test/.claude/state/auto-handoff/old-session.md', '/home/test/.claude/state/auto-handoff/pages/old-session.html'])
+    expect(files(calls.written).filter(p => !p.includes('/history/'))).toEqual(['/home/test/.claude/state/auto-handoff/old-session.md', '/home/test/.claude/state/auto-handoff/pages/old-session.html'])
     expect(calls.written['/home/test/.claude/state/auto-handoff/old-session.md']).toContain('Finish the parser refactor')
+    // The log is how a failed handoff gets diagnosed: it must name the threshold and the brief.
+    const log = calls.written['/home/test/.claude/state/auto-handoff/auto-handoff.log'] ?? ''
+    expect(log).toContain('threshold session=old-session tokens=165000')
+    expect(log).toContain('brief written /home/test/.claude/state/auto-handoff/old-session.md')
     expect(calls.cleared).toBe(1)
 
     await $.classic.SessionStart({ source: 'clear' })
@@ -279,6 +299,17 @@ describe('auto-handoff', () => {
     const brief = calls.written['/home/test/.claude/state/auto-handoff/old-session.md']
     expect(brief).not.toContain('Sure, I can help')
     expect(brief).toContain('## Last Real User Message (verbatim)\nplease refactor the parser')
+  })
+
+  test('without sh the server cannot launch, and the link is the local file', async ($, on) => {
+    const calls = engine(on, { tokens: 165_000, noSh: true })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    expect(calls.written['/home/test/.claude/state/auto-handoff/pages/old-session.html']).toBeDefined()
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    expect(calls.seeded[0]).toContain('file:///home/test/.claude/state/auto-handoff/pages/old-session.html')
+    expect(calls.seeded[0]).not.toContain('http://')
   })
 
   test('a blank viewer setting means no server, and the link is the local file', { options: { viewer: '' } }, async ($, on) => {
@@ -403,10 +434,19 @@ describe('auto-handoff', () => {
     expect(brief.startsWith('## Rules\nJust keep going.')).toBe(true)
   })
 
+  test('without sh, the log is written through fs and keeps every line', async ($, on) => {
+    const calls = engine(on, { tokens: 165_000, noSh: true })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    const log = calls.written['/home/test/.claude/state/auto-handoff/auto-handoff.log'] ?? ''
+    expect(log).toContain('threshold session=old-session tokens=165000')
+    expect(log).toContain('brief written /home/test/.claude/state/auto-handoff/old-session.md')
+  })
+
   test('a new session writes missing templates and leaves existing ones alone', async ($, on) => {
     const calls = engine(on, { tokens: 1_000, files: { '/home/test/.claude/auto-handoff/brief.md': 'mine' } })
     await $.classic.SessionStart({ source: 'startup' })
-    expect(Object.keys(calls.written)).toEqual(['/home/test/.claude/auto-handoff/instructions.md'])
+    expect(files(calls.written)).toEqual(['/home/test/.claude/auto-handoff/instructions.md'])
     expect(calls.written['/home/test/.claude/auto-handoff/instructions.md']).toContain('{{#priority}}')
   })
 

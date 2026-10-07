@@ -45,6 +45,7 @@ Test it.`
     expect(viewerLink(undefined, '/pages', 'abc12345')).toBe('file:///pages/abc12345.html')
     // A compacted segment's page: its _<n> stays in the short link.
     expect(viewerLink({ host: '100.64.0.1', port: '3846' }, '/pages', 'abc12345-0000-4000_2')).toBe('http://100.64.0.1:3846/abc12345_2')
+    expect(viewerLink(undefined, 'C:\\Users\\x/.claude/pages', 'abc12345')).toBe('file:///C:/Users/x/.claude/pages/abc12345.html')
   })
 
   test('renderPage links the chain and escapes a brief that tries to close the script tag', () => {
