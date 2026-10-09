@@ -763,6 +763,32 @@ describe('auto-handoff', () => {
     expect(await band($)).toContain('handoff failed')
   })
 
+  test('a /clear that arrives after its lock was released still seeds the fresh session', { timeoutMs: 30_000 }, async ($, on) => {
+    const calls = engine(on, { tokens: 165_000, clear: 'hang' })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    calls.tokens = 50_000
+    await clock.advance(121_000)
+    await $.tool.call({ tool: 'Read', file_path: '/a.txt' }) // releases the stuck lock
+    expect(calls.ran).toBe(1)
+
+    await $.classic.SessionStart({ source: 'clear' }) // the queued /clear runs after all
+    await settle(() => calls.seeded.length > 0)
+    expect(calls.seeded.length).toBe(1)
+    expect(calls.seeded[0]).toContain('Read the brief at /home/test/.claude/state/auto-handoff/old-session.md')
+    expect(calls.written['/home/test/.claude/state/auto-handoff/auto-handoff.log'] ?? '').toContain('late clear session=old-session')
+  })
+
+  test('an auto-compact after the lock expired is not skipped as "in progress"', { timeoutMs: 30_000 }, async ($, on) => {
+    const calls = engine(on, { tokens: 165_000, clear: 'hang' })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    await clock.advance(121_000)
+    const r = await $.session.compact({ trigger: 'auto', messages: BASIC })
+    expect('skip' in r && r.skip === 'auto-handoff in progress').toBe(false)
+    expect(calls.written['/home/test/.claude/state/auto-handoff/auto-handoff.log'] ?? '').toContain('handoff stuck session=old-session')
+  })
+
   test('past the threshold, tool calls are refused before they run', async ($, on) => {
     // Seen live: ~28 reads in one step took the session from 67k to 437k.
     const calls = engine(on, { tokens: 67_000, env: { AUTO_HANDOFF_TOKENS: '80000' }, toolChars: 220_000 })

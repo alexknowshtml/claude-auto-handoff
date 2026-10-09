@@ -35,8 +35,12 @@ let inFlight = false
 // and every tool call after that was refused. lock records when and for which session the handoff
 // began, so a handoff that does not finish releases the lock on its own (releaseIfStuck).
 let lock: { session: string; since: number } | undefined
-// Bumped when a stuck handoff is released: a handoff() that wakes up afterwards must not set pending again.
+// Bumped when a stuck handoff is released: a handoff() that wakes up afterwards must not touch
+// pending, inFlight or the panel again, in its success path and in its failure paths alike.
 let run = 0
+// The pending handoff a release dropped while its /clear was already queued. That /clear can still
+// run; its SessionStart then seeds from here instead of leaving a fresh session with no brief.
+let expired: Pending | undefined
 // Longest a handoff may hold the lock: the brief (Haiku, 60 s timeout) plus /clear on an idle session.
 const STUCK_MS = 120_000
 let seededSession: string | undefined
@@ -208,8 +212,9 @@ const clockTime = (ms: number) => `${new Date(ms).toISOString().slice(11, 19)}Z`
 
 // Releases a handoff lock older than STUCK_MS. A time limit, not a session-id check: the new id is
 // visible before the seeding SessionStart runs, so a reset on session change would drop a handoff
-// that is about to succeed. Loud on purpose: the log, and the panel's failure state, which stays
-// until dismissed.
+// that is about to succeed. Each phase gets the full limit: lock.since is set when the brief starts
+// and set again when the /clear is queued, so a slow brief does not eat the /clear's time.
+// Loud on purpose: the log, and the panel's failure state, which stays until dismissed.
 async function releaseIfStuck($: EngineInterface): Promise<void> {
   if ((!inFlight && !pending) || !lock) return
   const age = (await $.clock.now()) - lock.since
@@ -219,6 +224,8 @@ async function releaseIfStuck($: EngineInterface): Promise<void> {
   await log($, `handoff stuck session=${lock.session} since=${clockTime(lock.since)} state=${state} age=${Math.round(age / 1000)}s; lock released, tool calls run again`)
   run++
   inFlight = false
+  // A queued /clear cannot be withdrawn: keep what it needs to seed, should it still arrive.
+  expired = pending
   pending = undefined
   lock = undefined
   failed($, `${state} did not finish within ${STUCK_MS / 1000}s`,
@@ -274,20 +281,29 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
       return
     }
     pending = { oldSession: sessionId, briefPath, tokens, chain, link, problem }
+    expired = undefined
+    if (lock) lock = { ...lock, since: await $.clock.now() } // the /clear gets its own STUCK_MS
     steps($, [briefStep(problem), { mark: 'spin', text: 'clearing' }])
     await $.store.set(`fired:${sessionId}`, problem ? `clearing-facts-only:${problem}` : 'clearing')
     await log($, `brief written ${briefPath} (${brief.length} chars); queueing /clear`)
     $.command.run({ command: 'clear' }).catch(async (err: unknown) => {
+      await log($, `clear rejected ${String(err)}`)
+      // A run released as stuck no longer owns pending: a newer handoff may hold it. Its /clear
+      // will not come now, so nothing is left for a late SessionStart to seed.
+      if (ownRun !== run) {
+        if (expired?.oldSession === sessionId) expired = undefined
+        return
+      }
       pending = undefined
       // fired stays 'clearing', so this session does not try again; it carries on as it is.
       failed($, '/clear was rejected', `this session keeps going; the brief is at ${briefPath}`)
-      await log($, `clear rejected ${String(err)}`)
     })
   } catch (err) {
+    await log($, `handoff error session=${sessionId} ${String(err)}; no clear`)
+    if (ownRun !== run) return
     pending = undefined
     // fired stays 'briefing', which tryHandoff treats as an orphan: the next turn tries again.
     failed($, 'no brief written', 'this session keeps going and tries again after the next turn')
-    await log($, `handoff error session=${sessionId} ${String(err)}; no clear`)
   }
 }
 
@@ -522,6 +538,7 @@ export const register: Register = (on, options) => {
   // crosses the threshold, end the turn here and hand off instead of sending a request
   // that may overflow the window.
   on('turn.step', async function* ($, e, next) {
+    if (!e.agentId) await releaseIfStuck($).catch(() => {})
     if (!e.agentId && !inFlight && !pending && e.index > 0) {
       try {
         const tokens = (await $.session.usage()).context.tokens
@@ -568,6 +585,7 @@ export const register: Register = (on, options) => {
   // two compactions, no turn.step line). Catch it here and hand off in its place.
   on('session.compact', async ($, e, next) => {
     if (e.trigger !== 'auto' || e.agentId) return next(e)
+    await releaseIfStuck($).catch(() => {})
     if (inFlight || pending) return { skip: 'auto-handoff in progress' }
     try {
       const sessionId = await $.session.id()
@@ -618,10 +636,16 @@ export const register: Register = (on, options) => {
       await keepServing($)
     }
     // A /clear of the person's own leaves no handoff to report; the panel from the last one goes too.
-    if (e.source === 'clear' && !pending && !inFlight && shown) hidePanel($)
-    if (e.source !== 'clear' || !pending) return r
-    const p = pending
+    // A /clear that arrives after its lock was released as stuck still empties the context: seed it
+    // from the brief that was written for it, rather than leave the fresh session with nothing.
+    const late = e.source === 'clear' && !pending ? expired : undefined
+    if (e.source === 'clear' && !pending && !late && !inFlight && shown) hidePanel($)
+    if (e.source !== 'clear') return r
+    const p = pending ?? late
+    if (!p) return r
+    if (late) await log($, `late clear session=${late.oldSession}: arrived after its lock was released; seeding from ${late.briefPath}`)
     pending = undefined
+    expired = undefined
     try {
       const newSession = await $.session.id()
       seededSession = newSession
