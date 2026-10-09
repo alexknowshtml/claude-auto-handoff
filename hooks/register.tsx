@@ -40,7 +40,10 @@ let lock: { session: string; since: number } | undefined
 let run = 0
 // The pending handoff a release dropped while its /clear was already queued. That /clear can still
 // run; its SessionStart then seeds from here instead of leaving a fresh session with no brief.
+// SessionStart cannot tell that /clear from the person's own, so the claim is bounded: it holds for
+// STUCK_MS after the release, and a new handoff drops it. A later /clear starts empty, as it should.
 let expired: Pending | undefined
+let expiredAt = 0
 // Longest a handoff may hold the lock: the brief (Haiku, 60 s timeout) plus /clear on an idle session.
 const STUCK_MS = 120_000
 let seededSession: string | undefined
@@ -226,6 +229,7 @@ async function releaseIfStuck($: EngineInterface): Promise<void> {
   inFlight = false
   // A queued /clear cannot be withdrawn: keep what it needs to seed, should it still arrive.
   expired = pending
+  expiredAt = lock.since + age
   pending = undefined
   lock = undefined
   failed($, `${state} did not finish within ${STUCK_MS / 1000}s`,
@@ -276,16 +280,26 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     const header = { from: own?.from, chain, depth: depth !== undefined ? String(depth) : undefined, tokens: String(tokens), at: new Date().toISOString(), cwd }
     await $.fs.write(briefPath, withHeader(header, brief))
     const link = await viewer($, briefDir, pagesDir, sessionId)
+    // Read the time first: a release may run during any await, and the check below must be the
+    // last thing before the state changes, with no await between them.
+    const clearingSince = await $.clock.now()
     if (ownRun !== run) {
       await log($, `handoff abandoned session=${sessionId}: its lock was released as stuck; brief at ${briefPath}, no clear`)
       return
     }
     pending = { oldSession: sessionId, briefPath, tokens, chain, link, problem }
     expired = undefined
-    if (lock) lock = { ...lock, since: await $.clock.now() } // the /clear gets its own STUCK_MS
+    if (lock) lock = { ...lock, since: clearingSince } // the /clear gets its own STUCK_MS
     steps($, [briefStep(problem), { mark: 'spin', text: 'clearing' }])
     await $.store.set(`fired:${sessionId}`, problem ? `clearing-facts-only:${problem}` : 'clearing')
     await log($, `brief written ${briefPath} (${brief.length} chars); queueing /clear`)
+    // Released while the marker and the log were written: the session carries on, no /clear, and
+    // nothing is left for a late SessionStart to seed.
+    if (ownRun !== run) {
+      if (expired?.oldSession === sessionId) expired = undefined
+      await log($, `handoff abandoned session=${sessionId}: released before its /clear was queued; brief at ${briefPath}, no clear`)
+      return
+    }
     $.command.run({ command: 'clear' }).catch(async (err: unknown) => {
       await log($, `clear rejected ${String(err)}`)
       // A run released as stuck no longer owns pending: a newer handoff may hold it. Its /clear
@@ -336,6 +350,7 @@ async function tryHandoff($: EngineInterface, sessionId: string, tokens: number,
   unattended++
 
   inFlight = true
+  expired = undefined // a new handoff: what an older one left behind seeds nothing any more
   lock = { session: sessionId, since: await $.clock.now() }
   gated = undefined
   await $.store.set(`fired:${sessionId}`, 'briefing')
@@ -638,7 +653,12 @@ export const register: Register = (on, options) => {
     // A /clear of the person's own leaves no handoff to report; the panel from the last one goes too.
     // A /clear that arrives after its lock was released as stuck still empties the context: seed it
     // from the brief that was written for it, rather than leave the fresh session with nothing.
-    const late = e.source === 'clear' && !pending ? expired : undefined
+    const lateWindow = e.source === 'clear' && !pending && expired && (await $.clock.now()) - expiredAt <= STUCK_MS
+    const late = lateWindow ? expired : undefined
+    if (e.source === 'clear' && !pending && expired && !late) {
+      await log($, `clear after the late window session=${expired.oldSession}: not seeded from its brief`)
+      expired = undefined
+    }
     if (e.source === 'clear' && !pending && !late && !inFlight && shown) hidePanel($)
     if (e.source !== 'clear') return r
     const p = pending ?? late

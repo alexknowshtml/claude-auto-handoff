@@ -779,6 +779,21 @@ describe('auto-handoff', () => {
     expect(calls.written['/home/test/.claude/state/auto-handoff/auto-handoff.log'] ?? '').toContain('late clear session=old-session')
   })
 
+  test('a /clear long after the release is the person\'s own and starts empty', { timeoutMs: 60_000 }, async ($, on) => {
+    const calls = engine(on, { tokens: 165_000, clear: 'hang' })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    calls.tokens = 50_000
+    await clock.advance(121_000)
+    await $.tool.call({ tool: 'Read', file_path: '/a.txt' }) // releases the stuck lock
+    await clock.advance(121_000) // past the late window
+
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => false)
+    expect(calls.seeded.length).toBe(0)
+    expect(calls.written['/home/test/.claude/state/auto-handoff/auto-handoff.log'] ?? '').toContain('clear after the late window session=old-session')
+  })
+
   test('an auto-compact after the lock expired is not skipped as "in progress"', { timeoutMs: 30_000 }, async ($, on) => {
     const calls = engine(on, { tokens: 165_000, clear: 'hang' })
     await $.turn.complete(TURN)
