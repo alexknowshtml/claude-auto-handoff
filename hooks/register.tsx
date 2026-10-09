@@ -29,6 +29,16 @@ type Pending = { oldSession: string; briefPath: string; tokens: number; chain: s
 // Module variables survive /clear; $.state does not.
 let pending: Pending | undefined
 let inFlight = false
+// While inFlight or pending, every tool call is refused. Both were released only by the handoff
+// itself: inFlight by handoff()'s finally, pending by the SessionStart of the /clear. Seen live
+// 2026-10-09: the /clear never reached SessionStart, pending stayed set for the life of the process,
+// and every tool call after that was refused. lock records when and for which session the handoff
+// began, so a handoff that does not finish releases the lock on its own (releaseIfStuck).
+let lock: { session: string; since: number } | undefined
+// Bumped when a stuck handoff is released: a handoff() that wakes up afterwards must not set pending again.
+let run = 0
+// Longest a handoff may hold the lock: the brief (Haiku, 60 s timeout) plus /clear on an idle session.
+const STUCK_MS = 120_000
 let seededSession: string | undefined
 let floor: number | undefined
 let unattended = 0 // handoffs since the user last typed a prompt
@@ -194,7 +204,29 @@ async function storedLineage($: EngineInterface, sessionId: string): Promise<Lin
   }
 }
 
+const clockTime = (ms: number) => `${new Date(ms).toISOString().slice(11, 19)}Z`
+
+// Releases a handoff lock older than STUCK_MS. A time limit, not a session-id check: the new id is
+// visible before the seeding SessionStart runs, so a reset on session change would drop a handoff
+// that is about to succeed. Loud on purpose: the log, and the panel's failure state, which stays
+// until dismissed.
+async function releaseIfStuck($: EngineInterface): Promise<void> {
+  if ((!inFlight && !pending) || !lock) return
+  const age = (await $.clock.now()) - lock.since
+  if (age <= STUCK_MS) return
+  const state = inFlight ? 'briefing' : 'clearing'
+  const briefPath = pending?.briefPath
+  await log($, `handoff stuck session=${lock.session} since=${clockTime(lock.since)} state=${state} age=${Math.round(age / 1000)}s; lock released, tool calls run again`)
+  run++
+  inFlight = false
+  pending = undefined
+  lock = undefined
+  failed($, `${state} did not finish within ${STUCK_MS / 1000}s`,
+    briefPath ? `tool calls run again; the brief is at ${briefPath}` : 'tool calls run again; no brief was written')
+}
+
 async function handoff($: EngineInterface, sessionId: string, tokens: number, threshold: number) {
+  const ownRun = run
   try {
     const own = sessionId === seededSession && lineage ? lineage : await storedLineage($, sessionId)
     const messages = await $.session.messages()
@@ -237,6 +269,10 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     const header = { from: own?.from, chain, depth: depth !== undefined ? String(depth) : undefined, tokens: String(tokens), at: new Date().toISOString(), cwd }
     await $.fs.write(briefPath, withHeader(header, brief))
     const link = await viewer($, briefDir, pagesDir, sessionId)
+    if (ownRun !== run) {
+      await log($, `handoff abandoned session=${sessionId}: its lock was released as stuck; brief at ${briefPath}, no clear`)
+      return
+    }
     pending = { oldSession: sessionId, briefPath, tokens, chain, link, problem }
     steps($, [briefStep(problem), { mark: 'spin', text: 'clearing' }])
     await $.store.set(`fired:${sessionId}`, problem ? `clearing-facts-only:${problem}` : 'clearing')
@@ -284,13 +320,15 @@ async function tryHandoff($: EngineInterface, sessionId: string, tokens: number,
   unattended++
 
   inFlight = true
+  lock = { session: sessionId, since: await $.clock.now() }
   gated = undefined
   await $.store.set(`fired:${sessionId}`, 'briefing')
   await log($, `threshold session=${sessionId} tokens=${tokens} threshold=${threshold} via=${via}`)
   showPanel($, { header: { mark: 'spin', text: `auto-handoff · ${k(tokens)} / ${k(threshold)}` }, steps: [{ mark: 'spin', text: 'writing brief' }] },
     `context ${k(tokens)} is past ${k(threshold)}: handing off`)
   // Not awaited: the brief can take a while and /clear only runs once the session is idle.
-  handoff($, sessionId, tokens, threshold).finally(() => { inFlight = false })
+  const ownRun = run
+  handoff($, sessionId, tokens, threshold).finally(() => { if (ownRun === run) inFlight = false })
   return true
 }
 
@@ -425,6 +463,7 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     try {
       if (!e.agentId) await keepServing($)
+      if (!e.agentId) await releaseIfStuck($)
       if (e.agentId || inFlight || pending) return r // subagent turns fire turn.complete too
       const tokens = (await $.session.usage()).context.tokens
       if (tokens === undefined) return r
@@ -455,11 +494,18 @@ export const register: Register = (on, options) => {
     if (!e.agentId) {
       try {
         const sessionId = await $.session.id()
+        await releaseIfStuck($)
         const tokens = (await $.session.usage()).context.tokens
         const projected = (tokens ?? 0) + unmeasured
         const threshold = await thresholdFor($, sessionId)
-        if (inFlight || pending || (tokens !== undefined && projected >= threshold && await canHandOff($, sessionId))) {
-          if (!inFlight && !pending) gated = sessionId
+        // The refusal names its real reason: a handoff under way refuses at any size.
+        if ((inFlight || pending) && lock) {
+          const state = inFlight ? 'writing the brief' : 'waiting for /clear'
+          await log($, `tool refused session=${sessionId} tool=${e.tool} reason=handoff-in-progress since=${clockTime(lock.since)} state=${state}`)
+          return { deny: `[auto-handoff] Not run: a handoff in progress since ${clockTime(lock.since)} (${state}). This session is handing off to a fresh one, which will redo this call. Make no more tool calls.` }
+        }
+        if (tokens !== undefined && projected >= threshold && await canHandOff($, sessionId)) {
+          gated = sessionId
           await log($, `tool refused session=${sessionId} tool=${e.tool} projected=${projected} threshold=${threshold}`)
           return { deny: `[auto-handoff] Not run: the context is past the handoff threshold (${k(projected)} ≥ ${k(threshold)}). This session is handing off to a fresh one, which will redo this call. Make no more tool calls.` }
         }
