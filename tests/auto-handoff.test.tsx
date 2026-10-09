@@ -56,7 +56,7 @@ const posix = (p: string) => p.replace(/^[A-Za-z]:/, '').replace(/\\/g, '/')
 const files = (written: Record<string, string>) => Object.keys(written).filter(p => !p.endsWith('/auto-handoff.log'))
 
 // The engine beneath the plugin: everything the mod calls, answered from memory.
-function engine(on: On, opts: { tokens: number; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[]; noSh?: boolean }): Calls {
+function engine(on: On, opts: { tokens: number; files?: Record<string, string>; env?: Record<string, string>; brief?: string | null; messages?: SessionMessage[]; toolChars?: number; streamToolChars?: number; store?: Record<string, unknown>; stepUsage?: boolean; surfaces?: ('terminal' | 'desktop' | 'mobile' | 'vscode')[]; noSh?: boolean; clear?: 'hang' }): Calls {
   const calls: Calls = { compacts: 0, steps: 0, cleared: 0, seeded: [], written: {}, completes: 0, tokens: opts.tokens, prompts: [], toasts: [], ran: 0 }
   let sessionId = 'old-session'
   let clears = 0
@@ -117,6 +117,8 @@ function engine(on: On, opts: { tokens: number; files?: Record<string, string>; 
   })
   on('command.run', async () => {
     calls.cleared++
+    // clear: 'hang' — the /clear never runs and never settles; the session stays as it is.
+    if (opts.clear === 'hang') return new Promise<never>(() => {})
     sessionId = `new-session-${++clears}`
     return {}
   })
@@ -735,6 +737,71 @@ describe('auto-handoff', () => {
     await ui.press({ key: 'dismiss' })
     expect(textOf(await ui.drawn())).toBe('')
     await ui.unmount()
+  })
+
+  // Seen live 2026-10-09: "brief written … queueing /clear", then no "seeding" line. The /clear never
+  // reached SessionStart, `pending` stayed set for the life of the process, and every later tool call
+  // was refused with "past the handoff threshold (131k ≥ 160k)" — a comparison that was not the reason.
+  // timeoutMs: two minutes on the mocked clock step the panel's spinner frame by frame.
+  test('a /clear that never arrives refuses with its real reason, then releases the lock and says so', { timeoutMs: 30_000 }, async ($, on) => {
+    const calls = engine(on, { tokens: 165_000, clear: 'hang' })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    calls.tokens = 50_000 // the session carries on, far under the threshold
+
+    const early = await $.tool.call({ tool: 'Read', file_path: '/a.txt' })
+    expect('deny' in early && early.deny?.includes('handoff in progress since')).toBe(true)
+    expect('deny' in early && early.deny?.includes('past the handoff threshold')).toBe(false)
+    expect(calls.ran).toBe(0)
+
+    await clock.advance(121_000)
+    const late = await $.tool.call({ tool: 'Read', file_path: '/b.txt' })
+    expect('deny' in late).toBe(false)
+    expect(calls.ran).toBe(1)
+    const log = calls.written['/home/test/.claude/state/auto-handoff/auto-handoff.log'] ?? ''
+    expect(log).toContain('handoff stuck session=old-session')
+    expect(await band($)).toContain('handoff failed')
+  })
+
+  test('a /clear that arrives after its lock was released still seeds the fresh session', { timeoutMs: 30_000 }, async ($, on) => {
+    const calls = engine(on, { tokens: 165_000, clear: 'hang' })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    calls.tokens = 50_000
+    await clock.advance(121_000)
+    await $.tool.call({ tool: 'Read', file_path: '/a.txt' }) // releases the stuck lock
+    expect(calls.ran).toBe(1)
+
+    await $.classic.SessionStart({ source: 'clear' }) // the queued /clear runs after all
+    await settle(() => calls.seeded.length > 0)
+    expect(calls.seeded.length).toBe(1)
+    expect(calls.seeded[0]).toContain('Read the brief at /home/test/.claude/state/auto-handoff/old-session.md')
+    expect(calls.written['/home/test/.claude/state/auto-handoff/auto-handoff.log'] ?? '').toContain('late clear session=old-session')
+  })
+
+  test('a /clear long after the release is the person\'s own and starts empty', { timeoutMs: 60_000 }, async ($, on) => {
+    const calls = engine(on, { tokens: 165_000, clear: 'hang' })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    calls.tokens = 50_000
+    await clock.advance(121_000)
+    await $.tool.call({ tool: 'Read', file_path: '/a.txt' }) // releases the stuck lock
+    await clock.advance(121_000) // past the late window
+
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => false)
+    expect(calls.seeded.length).toBe(0)
+    expect(calls.written['/home/test/.claude/state/auto-handoff/auto-handoff.log'] ?? '').toContain('clear after the late window session=old-session')
+  })
+
+  test('an auto-compact after the lock expired is not skipped as "in progress"', { timeoutMs: 30_000 }, async ($, on) => {
+    const calls = engine(on, { tokens: 165_000, clear: 'hang' })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    await clock.advance(121_000)
+    const r = await $.session.compact({ trigger: 'auto', messages: BASIC })
+    expect('skip' in r && r.skip === 'auto-handoff in progress').toBe(false)
+    expect(calls.written['/home/test/.claude/state/auto-handoff/auto-handoff.log'] ?? '').toContain('handoff stuck session=old-session')
   })
 
   test('past the threshold, tool calls are refused before they run', async ($, on) => {

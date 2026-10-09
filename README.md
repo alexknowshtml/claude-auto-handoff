@@ -106,6 +106,7 @@ The mod hot-reloads when you save while it's loaded with `--plugin-dir`.
 
 ## Changelog
 
+- **0.8.7** A handoff that does not finish no longer locks the session. If the `/clear` never reaches SessionStart, or the brief never lands, the lock releases after two minutes (the brief and the `/clear` each get their own two minutes), the log says `handoff stuck`, and the panel shows the failure. A `/clear` that still runs after the release seeds the fresh session from the brief instead of leaving it empty, and a handoff that wakes up after its release leaves a newer one alone. Until then a refused tool call names its real reason (`a handoff in progress since …`) instead of a threshold comparison that may not hold.
 - **0.8.6** On a machine without `sh` (Windows), the brief page is still written, and the link opens it as a local file instead of a server that never started. The viewer no longer shells out to `mkdir`.
 - **0.8.5** Windows support, from [@davidboomcycle](https://github.com/davidboomcycle) (#3). The mod falls back to `USERPROFILE` when `HOME` is unset, so briefs no longer land in `<project>/undefined/`. Where there is no `sh`, the log is written through `$.fs`. The tests pass on Windows. The viewer server still needs a POSIX shell.
 - **0.8.4** Any token figure in Haiku's brief that isn't in Handoff Numbers is marked `[unverified: not in Handoff Numbers]` and logged. The figure is marked, not removed.
