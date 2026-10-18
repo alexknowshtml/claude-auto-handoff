@@ -111,14 +111,12 @@ export function renderPage(entry: Entry, chain: readonly Entry[]): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Session Context ${esc(short(entry.id))}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;700&family=Fraunces:opsz,wght@9..144,400;9..144,700;9..144,900&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+<!-- No external resources on this page. Brief sections are shown as plain text, so nothing in a
+     brief can load a remote image or script when the page is opened. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'none'; connect-src 'none'; font-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
 <style>
   :root { color-scheme: light; --paper: #F7F3ED; --ink: #1C1C1C; --red: #E63946; --blue: #457B9D; --green: #2A9D8F;
-    --font-display: 'Fraunces', serif; --font-body: 'DM Sans', sans-serif; --font-mono: 'DM Mono', monospace; }
+    --font-display: Georgia, 'Times New Roman', serif; --font-body: -apple-system, system-ui, 'Helvetica Neue', sans-serif; --font-mono: ui-monospace, Menlo, Consolas, monospace; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: var(--font-body); background: var(--ink); color: var(--ink); font-size: 16px; line-height: 1.7; -webkit-font-smoothing: antialiased; min-height: 100vh; }
   .card { max-width: 760px; margin: 0 auto; padding-bottom: 48px; }
@@ -142,7 +140,7 @@ export function renderPage(entry: Entry, chain: readonly Entry[]): string {
   h3 { font-family: var(--font-display); font-weight: 700; font-size: 1.05rem; color: var(--blue); margin: 16px 0 6px; }
   p { margin: 0 0 12px; } p:last-child { margin-bottom: 0; }
   code { font-family: var(--font-mono); background: rgba(28,28,28,0.07); padding: 1px 5px; border-radius: 3px; font-size: 0.85em; word-break: break-all; }
-  pre { background: var(--ink); color: var(--paper); padding: 14px 18px; margin: 12px 0; font-size: 0.85em; white-space: pre-wrap; word-break: break-all; box-shadow: 4px 4px 0 var(--blue); }
+  pre { background: transparent; color: var(--ink); padding: 0; margin: 0; font-family: var(--font-body); font-size: 1em; white-space: pre-wrap; overflow-wrap: anywhere; }
   pre code { background: none; padding: 0; color: inherit; }
   ul, ol { padding-left: 20px; margin: 0 0 12px; } li { margin-bottom: 5px; line-height: 1.55; }
   li::marker { color: var(--red); } ol li::marker { color: var(--ink); }
@@ -162,8 +160,7 @@ export function renderPage(entry: Entry, chain: readonly Entry[]): string {
   parts.forEach(function (md) {
     var div = document.createElement('div');
     div.className = 'section';
-    if (window.marked && window.DOMPurify) div.innerHTML = DOMPurify.sanitize(marked.parse(md));
-    else { var pre = document.createElement('pre'); pre.textContent = md; div.appendChild(pre); }
+    var pre = document.createElement('pre'); pre.textContent = md; div.appendChild(pre);
     out.appendChild(div);
   });
 </script>

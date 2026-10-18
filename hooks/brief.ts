@@ -158,8 +158,9 @@ export function assembleBrief(ctx: BriefContext, facts: Facts, haiku: string | u
 
 ## How to Use This Brief
 ${haiku ? 'Haiku wrote the judgment sections from conversation text with tool output abbreviated. The facts sections came from tool calls in code.' : 'Haiku did not return a usable brief, so this holds only facts extracted in code. Read the transcript for the rest.'} Treat every line as a starting point, not a fact. Before acting on anything here, spawn a subagent to verify: run git status, gh pr view, or Read the file directly. If a fact is missing, grep the transcript before asking the user.`
-  // A valid Haiku brief already quotes the last request in its own section.
-  return [header, haiku?.trim(), factsBlock(facts, !haiku)].filter(Boolean).join('\n\n')
+  // Keep the verbatim last user message in every brief, valid Haiku brief or not, so the fresh
+  // session always has the request even if Haiku dropped or rewrote it.
+  return [header, haiku?.trim(), factsBlock(facts, true)].filter(Boolean).join('\n\n')
 }
 
 // A token figure: "93k", "93.1k", "93,105 tokens", "93105 tokens".

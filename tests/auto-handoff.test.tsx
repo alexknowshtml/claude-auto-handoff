@@ -437,7 +437,9 @@ describe('auto-handoff', () => {
     expect(brief).toContain('## How to Use This Brief')
     expect(brief).toContain('Finish the parser refactor')
     expect(brief).toContain('- feat(mods): auto-handoff (47edd8e)')
-    expect(brief).not.toContain('## Last Real User Message') // Haiku's section quotes it; no duplicate
+    // The verbatim last request is always kept, even with a valid Haiku brief.
+    expect(brief).toContain('## Last Real User Message (verbatim)')
+    expect(brief).toContain('fix #846 please')
     const prompt = calls.prompts[0] ?? ''
     expect(prompt).toContain('- /repo/mod.ts')
     expect(prompt).toContain('## Questions Answered')
