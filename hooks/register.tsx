@@ -1,5 +1,5 @@
 import type { EngineInterface, Register, Timer } from 'claude-code'
-import { assembleBrief, briefPrompt, extractFacts, isValidBrief, markUnverifiedFigures } from './brief.ts'
+import { assembleBrief, briefPrompt, extractFacts, firstPrompts, isValidBrief, markUnverifiedFigures } from './brief.ts'
 import { chainOf, parseBrief, renderPage, viewerLink, withHeader } from './viewer.ts'
 import type { Entry } from './viewer.ts'
 import { SERVER_JS, parseAddress } from './server.ts'
@@ -22,7 +22,7 @@ const CHARS_PER_TOKEN = 4
 const LOG = `~/${BRIEF_DIR}/auto-handoff.log`
 
 // problem: why the brief is facts only, when Haiku's summary was unusable.
-type Pending = { oldSession: string; briefPath: string; tokens: number; chain: string; link: string; problem?: string }
+type Pending = { oldSession: string; briefPath: string; tokens: number; chain: string; link: string; problem?: string; origin?: string[] }
 
 
 
@@ -38,7 +38,8 @@ let handedFrom: { session: string; tokens: number; link: string; problem?: strin
 // The seeded session's place in its chain of handoffs, for its own brief's header. Also kept in
 // the store as lineage:<session>, because a hot reload resets module variables: a session seeded
 // before a reload would otherwise start a new chain when it hands off.
-type Lineage = { from: string; chain: string; depth?: number }
+// origin: the chain's first user prompts, verbatim, so every brief in a chain can show how the work started.
+type Lineage = { from: string; chain: string; depth?: number; origin?: string[] }
 let lineage: Lineage | undefined
 // Tokens added since the last response measured the context: tool results and the
 // response's own output. turn.complete alone missed a turn whose reads jumped from 63k
@@ -188,7 +189,7 @@ async function viewer($: EngineInterface, briefDir: string, pagesDir: string, se
 async function storedLineage($: EngineInterface, sessionId: string): Promise<Lineage | undefined> {
   try {
     const v = await $.store.get(`lineage:${sessionId}`) as Partial<Lineage> | undefined
-    return typeof v?.from === 'string' && typeof v.chain === 'string' ? { from: v.from, chain: v.chain, depth: typeof v.depth === 'number' ? v.depth : undefined } : undefined
+    return typeof v?.from === 'string' && typeof v.chain === 'string' ? { from: v.from, chain: v.chain, depth: typeof v.depth === 'number' ? v.depth : undefined, origin: Array.isArray(v.origin) ? v.origin.filter((x): x is string => typeof x === 'string') : undefined } : undefined
   } catch {
     return undefined
   }
@@ -208,6 +209,8 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     // A session with no lineage starts its chain. One seeded before depth existed stays unknown.
     const depth = own ? own.depth : 1
     if (depth !== undefined) facts.depth = depth
+    facts.origin = own?.origin?.length ? own.origin : firstPrompts(messages)
+    facts.originInherited = !!own?.origin?.length
     const briefTemplate = await template($, 'briefTemplate')
     const result = await $.model.complete({
       model: 'haiku',
@@ -237,7 +240,7 @@ async function handoff($: EngineInterface, sessionId: string, tokens: number, th
     const header = { from: own?.from, chain, depth: depth !== undefined ? String(depth) : undefined, tokens: String(tokens), at: new Date().toISOString(), cwd }
     await $.fs.write(briefPath, withHeader(header, brief))
     const link = await viewer($, briefDir, pagesDir, sessionId)
-    pending = { oldSession: sessionId, briefPath, tokens, chain, link, problem }
+    pending = { oldSession: sessionId, briefPath, tokens, chain, link, problem, origin: facts.origin }
     steps($, [briefStep(problem), { mark: 'spin', text: 'clearing' }])
     await $.store.set(`fired:${sessionId}`, problem ? `clearing-facts-only:${problem}` : 'clearing')
     await log($, `brief written ${briefPath} (${brief.length} chars); queueing /clear`)
@@ -587,7 +590,7 @@ export const register: Register = (on, options) => {
       steps($, [briefStep(p.problem), { mark: 'done', text: 'cleared' }, { mark: 'spin', text: 'starting the fresh session' }])
       const own = await storedLineage($, p.oldSession)
       const prior = own ? own.depth : 1
-      lineage = { from: p.oldSession, chain: p.chain, depth: prior !== undefined ? prior + 1 : undefined }
+      lineage = { from: p.oldSession, chain: p.chain, depth: prior !== undefined ? prior + 1 : undefined, origin: p.origin?.length ? p.origin : undefined }
       await $.store.set(`lineage:${newSession}`, lineage)
       // The old brief learns where it went, and its chain's pages link forward.
       try {
