@@ -30,6 +30,25 @@ export type Facts = {
   unattendedCount?: number
   /** Which handoff this is in its chain (1 for the first, 2 for the second, etc.). */
   depth?: number
+  /** Monitor and background Bash calls this session started, the newest per command, inputs in full. */
+  backgroundTasks?: string[]
+}
+
+const TASK_CHARS = 2_000
+const MAX_TASKS = 8
+
+/** Monitors and background shell commands, newest per command, with their full inputs. */
+export function backgroundTasks(messages: readonly SessionMessage[]): string[] {
+  const byCommand = new Map<string, string>()
+  for (const m of messages) for (const t of m.toolUses) {
+    if (t.isError) continue
+    const isTask = t.tool === 'Monitor' || (t.tool === 'Bash' && t.input.run_in_background === true)
+    if (!isTask || typeof t.input.command !== 'string') continue
+    const json = JSON.stringify({ tool: t.tool, ...t.input })
+    byCommand.delete(t.input.command)
+    byCommand.set(t.input.command, json.length > TASK_CHARS ? json.slice(0, TASK_CHARS) + ' [truncated]' : json)
+  }
+  return [...byCommand.values()].slice(-MAX_TASKS)
 }
 
 /** The user's own words, or undefined for a harness signal or a tool-result-only message. */
@@ -71,7 +90,7 @@ export function extractFacts(messages: readonly SessionMessage[], ignoreFiles?: 
       if (subject && !commits.includes(subject)) commits.push(subject)
     }
   }
-  return { filesModified: [...files].slice(-20), commits: commits.slice(-10), issues: [...issues].slice(-15), lastUserMessage }
+  return { filesModified: [...files].slice(-20), commits: commits.slice(-10), issues: [...issues].slice(-15), lastUserMessage, backgroundTasks: backgroundTasks(messages) }
 }
 
 /** The transcript as Haiku reads it. Harness signals are labelled so they are not taken for the user. */
@@ -104,9 +123,19 @@ function handoffNumbersBlock(f: Facts): string {
 
 const k = (n: number) => `${Math.round(n / 1000)}k`
 
+// Tool inputs reach the brief model cut to 300 characters, so a running monitor's command never
+// survived a handoff; this lists them in full.
+function tasksBlock(f: Facts): string {
+  return `## Background Tasks Started This Session (exact inputs)
+Started this session; they may have ended since. Check before re-arming, and re-arm with these exact inputs.
+${list((f.backgroundTasks ?? []).map(t => '`' + t.replace(/`/g, "'") + '`'), 'None.')}`
+}
+
 export function factsBlock(f: Facts, withLastMessage = true): string {
   const numbers = handoffNumbersBlock(f)
-  const files = `## Files Modified (from Edit/Write calls)
+  const files = `${tasksBlock(f)}
+
+## Files Modified (from Edit/Write calls)
 ${list(f.filesModified, 'None.')}
 
 ## Commits This Session
