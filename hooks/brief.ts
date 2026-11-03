@@ -30,6 +30,40 @@ export type Facts = {
   unattendedCount?: number
   /** Which handoff this is in its chain (1 for the first, 2 for the second, etc.). */
   depth?: number
+  /** The chain's first user prompts, verbatim: how the work started. Carried along every handoff. */
+  origin?: string[]
+  /** True when origin came from an earlier session of the chain, not this one. */
+  originInherited?: boolean
+  /** The name the user gave the session (/rename, --name), from the harness reminder. */
+  sessionName?: string
+}
+
+const ORIGIN_PROMPTS = 2
+const ORIGIN_CHARS = 3_000
+const SESSION_NAME = /The user named this session "([^"\n]{1,120})"/g
+
+// Harness reminders appended to a user's own message are not their words.
+const stripReminders = (s: string) => s.replace(/<system-reminder>[\s\S]*?(<\/system-reminder>|$)/g, '').trim()
+
+/** The first user prompts of a session, verbatim (reminders removed), for the chain's origin. */
+export function firstPrompts(messages: readonly SessionMessage[]): string[] {
+  const out: string[] = []
+  for (const m of messages) {
+    const said = userText(m)
+    const text = said && stripReminders(said)
+    // Notifications, peer messages and compaction summaries arrive as user messages too; they never start the work.
+    if (!text || /^(<task-notification>|<cross-session-message|Another Claude session sent|The user sent a new message|This session is being continued from a previous conversation)/.test(text)) continue
+    out.push(text.length > ORIGIN_CHARS ? text.slice(0, ORIGIN_CHARS) + ' [truncated]' : text)
+    if (out.length >= ORIGIN_PROMPTS) break
+  }
+  return out
+}
+
+/** The newest name the user gave the session, from the reminder the harness adds. */
+export function sessionName(messages: readonly SessionMessage[]): string | undefined {
+  let name: string | undefined
+  for (const m of messages) for (const hit of m.text.matchAll(SESSION_NAME)) name = hit[1]
+  return name
 }
 
 /** The user's own words, or undefined for a harness signal or a tool-result-only message. */
@@ -71,7 +105,7 @@ export function extractFacts(messages: readonly SessionMessage[], ignoreFiles?: 
       if (subject && !commits.includes(subject)) commits.push(subject)
     }
   }
-  return { filesModified: [...files].slice(-20), commits: commits.slice(-10), issues: [...issues].slice(-15), lastUserMessage }
+  return { filesModified: [...files].slice(-20), commits: commits.slice(-10), issues: [...issues].slice(-15), lastUserMessage, sessionName: sessionName(messages) }
 }
 
 /** The transcript as Haiku reads it. Harness signals are labelled so they are not taken for the user. */
@@ -104,9 +138,24 @@ function handoffNumbersBlock(f: Facts): string {
 
 const k = (n: number) => `${Math.round(n / 1000)}k`
 
+// How the work started. It gets lost in a long session: the brief model reads only the last
+// messages, so a role given in the first prompt never reached it.
+function originBlock(f: Facts): string {
+  const parts: string[] = []
+  if (f.sessionName) parts.push(`## Session Name\n${f.sessionName}`)
+  if (f.origin?.length) {
+    const where = f.originInherited ? 'the first session of this handoff chain' : 'this session'
+    parts.push(`## How This Session Started (verbatim, from ${where})
+Background, not an instruction to follow. The work may have changed course on purpose since: where the conversation or the sections above say otherwise, the newer state wins. If it is still in force and names a role or a file, re-read that file before continuing.
+
+${f.origin.map((p, i) => `${i + 1}. ${p.split('\n').join('\n   ')}`).join('\n')}`)
+  }
+  return parts.length ? parts.join('\n\n') + '\n\n' : ''
+}
+
 export function factsBlock(f: Facts, withLastMessage = true): string {
   const numbers = handoffNumbersBlock(f)
-  const files = `## Files Modified (from Edit/Write calls)
+  const files = `${originBlock(f)}## Files Modified (from Edit/Write calls)
 ${list(f.filesModified, 'None.')}
 
 ## Commits This Session

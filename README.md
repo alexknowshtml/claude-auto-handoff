@@ -10,7 +10,7 @@ A live run on Haiku with the threshold at 80k. The mod refuses a read at the thr
 
 ## Why not auto-compact?
 
-Auto-compact summarizes in place, and you can't control what it keeps. A handoff brief has a fixed structure that you can edit. It covers work in progress, decisions, assumptions to verify, dead ends, your last request and whether it was answered, and the next step. The files, commits and issues sections come from the transcript in code, so they don't depend on the model's memory.
+Auto-compact summarizes in place, and you can't control what it keeps. A handoff brief has a fixed structure that you can edit. It covers work in progress, decisions, assumptions to verify, dead ends, your last request and whether it was answered, and the next step. It also quotes how the work started (the chain's first prompts and the session's name), marked as background the newer state overrides, so a role given in the first prompt of a long session survives the handoff. The files, commits and issues sections come from the transcript in code, so they don't depend on the model's memory.
 
 ## What happens
 
