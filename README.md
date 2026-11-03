@@ -51,6 +51,7 @@ Every setting is a row in `/config` under auto-handoff. They're stored in `~/.cl
 | Setting | Default | What it does |
 |---|---|---|
 | `threshold` | `160000` | Context tokens that trigger a handoff. Sized for a 200k window: it leaves room for the brief and the turn in flight. A seeded session hands off no sooner than 40k past its own starting size, whatever this says; set it lower than that and the panel tells you where the line actually is |
+| `modelThresholds` | blank | Per-model overrides of `threshold`, as `name=tokens` pairs: `haiku=100000, sonnet=300000`. A name matches when the model's name contains it, and the longest match wins. Useful where a model's price steps up past a prompt size, as Claude Haiku 5.5's does above 100k. `AUTO_HANDOFF_TOKENS` still overrides it |
 | `maxConsecutiveHandoffs` | `2` | Handoffs allowed before you type a prompt; past this, the mod pauses until you do |
 | `briefTemplate` | `~/.claude/auto-handoff/brief.md` | Your copy of the sections Haiku writes |
 | `instructionsTemplate` | `~/.claude/auto-handoff/instructions.md` | Your copy of what the fresh session is told to do |

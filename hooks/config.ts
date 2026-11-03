@@ -18,8 +18,11 @@ export const BRIEF_DIR = '.claude/state/auto-handoff'
 // that never count as edits.
 // viewer: where the mod serves the brief pages, "host:port"; "tailscale" as the host means this
 // machine's Tailscale IP, or 127.0.0.1 without Tailscale. Blank: no server, and the link is the local file.
-export type Config = { threshold: number; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp; viewer: string }
-export const DEFAULTS: Config = { threshold: 160_000, maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: 'tailscale:3846' }
+// modelThresholds: per-model overrides of threshold, "haiku=100000, sonnet=300000". Each key matches
+// when the model's name contains it (case-insensitive), so "haiku" covers claude-haiku-5-5, a Bedrock
+// id or the alias; the longest matching key wins, so "haiku-4-5" can sit beside "haiku".
+export type Config = { threshold: number; modelThresholds: Array<[string, number]>; maxUnattended: number; briefTemplate: string; instructionsTemplate: string; ignoreFiles?: RegExp; viewer: string }
+export const DEFAULTS: Config = { threshold: 160_000, modelThresholds: [], maxUnattended: 2, briefTemplate: '~/.claude/auto-handoff/brief.md', instructionsTemplate: '~/.claude/auto-handoff/instructions.md', viewer: 'tailscale:3846' }
 export const MIN_HEADROOM = 40_000
 // Each template's default, a file in the mod's templates/ folder.
 export const TEMPLATES = [['briefTemplate', 'brief.md'], ['instructionsTemplate', 'instructions.md']] as const
@@ -40,10 +43,31 @@ function pattern(v: unknown): RegExp | undefined {
   try { return new RegExp(v) } catch { return undefined }
 }
 
+// "haiku=100000, sonnet = 300k" -> [['haiku', 100000], ['sonnet', 300000]]; bad entries are dropped.
+export function parseModelThresholds(v: unknown): Array<[string, number]> {
+  if (typeof v !== 'string') return []
+  const out: Array<[string, number]> = []
+  for (const part of v.split(/[,;\n]/)) {
+    const m = part.trim().match(/^([\w.\-]+)\s*[=:]\s*(\d+(?:\.\d+)?)\s*(k?)$/i)
+    if (!m) continue
+    const n = Number(m[2]) * (m[3] ? 1000 : 1)
+    if (n > 0) out.push([m[1].toLowerCase(), Math.round(n)])
+  }
+  return out.sort((a, b) => b[0].length - a[0].length)
+}
+
+/** The model-specific threshold for a model name, or undefined when no key matches. */
+export function modelThreshold(cfg: Config, model: string | undefined): [string, number] | undefined {
+  if (!model) return undefined
+  const name = model.toLowerCase()
+  return cfg.modelThresholds.find(([key]) => name.includes(key))
+}
+
 /** The /config values, each checked, with the manifest's defaults for anything missing or bad. */
 export function parseConfig(options: Record<string, unknown>): Config {
   return {
   threshold: num(options.threshold, DEFAULTS.threshold),
+  modelThresholds: parseModelThresholds(options.modelThresholds),
   maxUnattended: num(options.maxConsecutiveHandoffs, DEFAULTS.maxUnattended),
   briefTemplate: str(options.briefTemplate, DEFAULTS.briefTemplate),
   instructionsTemplate: str(options.instructionsTemplate, DEFAULTS.instructionsTemplate),

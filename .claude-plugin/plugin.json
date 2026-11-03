@@ -15,6 +15,12 @@
       "description": "Context size that triggers a handoff. AUTO_HANDOFF_TOKENS overrides it for a test run. A seeded session hands off no sooner than 40k past its starting size; the panel above the prompt says so when this is set lower.",
       "default": 160000
     },
+    "modelThresholds": {
+      "type": "string",
+      "title": "Per-model thresholds",
+      "description": "Overrides of the threshold for some models, as \"name=tokens\" pairs separated by commas, e.g. \"haiku=100000\". A name matches when the model's name contains it; the longest match wins. AUTO_HANDOFF_TOKENS still overrides everything. Leave blank to use the threshold for every model.",
+      "default": ""
+    },
     "maxConsecutiveHandoffs": {
       "type": "number",
       "title": "Handoffs in a row without a message",
