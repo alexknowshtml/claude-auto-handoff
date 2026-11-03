@@ -5,7 +5,7 @@ import type { Entry } from './viewer.ts'
 import { SERVER_JS, parseAddress } from './server.ts'
 import { isSpinning, panelTree } from './panel.tsx'
 import type { Line, Panel } from './panel.tsx'
-import { BRIEF_DIR, DEFAULTS, LAST_RESORT_INSTRUCTIONS, MIN_HEADROOM, SEED_PREFIX, TEMPLATES, expand, k, linkify, parseConfig, short } from './config.ts'
+import { BRIEF_DIR, DEFAULTS, LAST_RESORT_INSTRUCTIONS, MIN_HEADROOM, SEED_PREFIX, TEMPLATES, expand, k, linkify, modelThreshold, parseConfig, short } from './config.ts'
 import type { Config, TemplateKey } from './config.ts'
 
 // At the token threshold, Haiku writes a handoff brief, the mod runs /clear, then seeds the
@@ -392,14 +392,23 @@ function showHandedOff($: EngineInterface, fresh: number) {
 
 // The configured threshold and where it came from. The env var wins so a test run needs no
 // /config change; it also outlives the test in that shell, which is why the headroom warning names it.
-async function configured($: EngineInterface): Promise<{ base: number; source: string }> {
+// After the env var, a modelThresholds entry matching the model wins over the plain threshold: the
+// request's own model where the hook has it (turn.step), else the main loop's model.
+async function configured($: EngineInterface, model?: string): Promise<{ base: number; source: string }> {
   const env = Number(await $.env.get('AUTO_HANDOFF_TOKENS'))
-  return env > 0 ? { base: env, source: 'AUTO_HANDOFF_TOKENS' } : { base: cfg.threshold, source: 'threshold in /config' }
+  if (env > 0) return { base: env, source: 'AUTO_HANDOFF_TOKENS' }
+  if (cfg.modelThresholds.length) {
+    let name = model
+    if (!name) { try { name = await $.session.model() } catch { name = undefined } }
+    const hit = modelThreshold(cfg, name)
+    if (hit) return { base: hit[1], source: `modelThresholds in /config (${hit[0]})` }
+  }
+  return { base: cfg.threshold, source: 'threshold in /config' }
 }
 
 // A seeded session hands off no sooner than MIN_HEADROOM past its floor, whatever the threshold says.
-async function thresholdFor($: EngineInterface, sessionId: string): Promise<number> {
-  const { base } = await configured($)
+async function thresholdFor($: EngineInterface, sessionId: string, model?: string): Promise<number> {
+  const { base } = await configured($, model)
   return sessionId === seededSession ? Math.max(base, (floor ?? 0) + MIN_HEADROOM) : base
 }
 
@@ -483,7 +492,7 @@ export const register: Register = (on, options) => {
         const isSeedTurn = sessionId === seededSession && floor === undefined
         if (tokens !== undefined && !isSeedTurn) {
           const projected = tokens + unmeasured
-          const threshold = await thresholdFor($, sessionId)
+          const threshold = await thresholdFor($, sessionId, e.model)
           const isGated = gated === sessionId
           if ((projected >= threshold || isGated) && await tryHandoff($, sessionId, projected, threshold, `turn.step measured=${tokens}${isGated ? ' gated' : ''}`)) {
             unmeasured = 0
