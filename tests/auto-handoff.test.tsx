@@ -450,6 +450,32 @@ describe('auto-handoff', () => {
     expect(calls.seeded.length).toBe(0)
   })
 
+  test('after a /clear, tool calls run until the new session has a measurement of its own', async ($, on) => {
+    const calls = engine(on, { tokens: 165_000 })
+    await $.classic.SessionStart({ source: 'clear' })
+    const r = await $.tool.call({ tool: 'Read', file_path: '/a.txt' })
+    expect('deny' in r).toBe(false)
+    expect(calls.ran).toBe(1)
+  })
+
+  test('a seeded session is not refused tools on the old session size', async ($, on) => {
+    const calls = engine(on, { tokens: 165_000 })
+    await $.turn.complete(TURN)
+    await settle(() => calls.cleared > 0)
+    await $.classic.SessionStart({ source: 'clear' })
+    await settle(() => calls.seeded.length > 0)
+    const r = await $.tool.call({ tool: 'Read', file_path: '/a.txt' })
+    expect('deny' in r).toBe(false)
+    expect(calls.ran).toBe(1)
+  })
+
+  test('the facts carry the recent user messages verbatim', async () => {
+    const facts = extractFacts([msg('user', 'first'), msg('assistant', 'ok'), msg('user', 'second'), msg('user', 'third'), msg('user', 'fourth')])
+    expect(facts.recentUserMessages).toEqual(['second', 'third', 'fourth'])
+    expect(factsBlock(facts)).toContain('## Recent User Messages')
+    expect(factsBlock(facts, false)).toContain('- third')
+  })
+
   test('a seeded session that starts above the threshold does not loop', async ($, on) => {
     // The 2026-10-03 live run: threshold 20k, every fresh session started at ~31k.
     const calls = engine(on, { tokens: 31_000, env: { AUTO_HANDOFF_TOKENS: '20000' } })

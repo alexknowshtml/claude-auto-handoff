@@ -49,6 +49,7 @@ let unmeasured = 0
 // tool output at CHARS_PER_TOKEN, which ran high in a live test (projected 83.7k, measured 72.5k)
 // and left a session that stopped working with no handoff.
 let gated: string | undefined
+let awaitingMeasure: string | undefined
 // From the latest SessionStart; /clear starts a new transcript file.
 let transcriptPath: string | undefined
 
@@ -429,6 +430,7 @@ export const register: Register = (on, options) => {
       const tokens = (await $.session.usage()).context.tokens
       if (tokens === undefined) return r
       const sessionId = await $.session.id()
+      if (awaitingMeasure === sessionId) awaitingMeasure = undefined
       if (sessionId === seededSession && floor === undefined) {
         // Fallback only: turn.step sets the floor from the seed turn's first response. Reached
         // when that response carried no usage.
@@ -455,7 +457,8 @@ export const register: Register = (on, options) => {
     if (!e.agentId) {
       try {
         const sessionId = await $.session.id()
-        const tokens = (await $.session.usage()).context.tokens
+        const stale = awaitingMeasure === sessionId
+        const tokens = stale ? undefined : (await $.session.usage()).context.tokens
         const projected = (tokens ?? 0) + unmeasured
         const threshold = await thresholdFor($, sessionId)
         if (inFlight || pending || (tokens !== undefined && projected >= threshold && await canHandOff($, sessionId))) {
@@ -505,7 +508,10 @@ export const register: Register = (on, options) => {
     const r = yield* next(e)
     // The response measured everything up to its request; its own output is new, and so is
     // any tool output that landed while it streamed (core runs tools before the stream ends).
-    if (!e.agentId && r.usage) unmeasured = unmeasured - before + r.usage.output_tokens
+    if (!e.agentId && r.usage) {
+      unmeasured = unmeasured - before + r.usage.output_tokens
+      awaitingMeasure = undefined
+    }
     // The seed turn's first request is the fresh session's true starting size. Measuring at
     // the end of that turn instead let a busy first turn (47k to 129k of reads) set
     // the floor at 129k, with the pre-request check off the whole way.
@@ -572,6 +578,10 @@ export const register: Register = (on, options) => {
       await keepServing($)
     }
     // A /clear of the person's own leaves no handoff to report; the panel from the last one goes too.
+    if (e.source === 'clear') {
+      awaitingMeasure = await $.session.id()
+      unmeasured = 0
+    }
     if (e.source === 'clear' && !pending && !inFlight && shown) hidePanel($)
     if (e.source !== 'clear' || !pending) return r
     const p = pending

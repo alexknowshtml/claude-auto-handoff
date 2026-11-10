@@ -8,6 +8,8 @@ import { renderTemplate, sectionHeadings } from './templates.ts'
 
 const MAX_MESSAGES = 120
 const MAX_MSG_CHARS = 2_000
+const RECENT_USER_MESSAGES = 3
+const RECENT_USER_CHARS = 300
 const MAX_TRANSCRIPT_CHARS = 150_000
 
 // Harness signals that arrive as user messages but are never the user's words.
@@ -21,6 +23,7 @@ export type Facts = {
   commits: string[]
   issues: string[]
   lastUserMessage?: string
+  recentUserMessages?: string[]
   handoffTokens?: number
   threshold?: number
   /** Where the base threshold came from: the env override or the /config setting. */
@@ -57,9 +60,13 @@ export function extractFacts(messages: readonly SessionMessage[], ignoreFiles?: 
   const commits: string[] = []
   const issues = new Set<string>()
   let lastUserMessage: string | undefined
+  const said3: string[] = []
   for (const m of messages) {
     const said = userText(m)
-    if (said) lastUserMessage = said
+    if (said) {
+      lastUserMessage = said
+      said3.push(said.length > RECENT_USER_CHARS ? `${said.slice(0, RECENT_USER_CHARS)} [truncated]` : said)
+    }
     for (const n of `${said ?? (m.role === 'assistant' ? m.text : '')}`.matchAll(/(?<![\w&/])#(\d{2,5})\b/g)) issues.add(`#${n[1]}`)
     for (const t of m.toolUses) {
       const path = t.input.file_path ?? t.input.notebook_path
@@ -71,7 +78,7 @@ export function extractFacts(messages: readonly SessionMessage[], ignoreFiles?: 
       if (subject && !commits.includes(subject)) commits.push(subject)
     }
   }
-  return { filesModified: [...files].slice(-20), commits: commits.slice(-10), issues: [...issues].slice(-15), lastUserMessage }
+  return { filesModified: [...files].slice(-20), commits: commits.slice(-10), issues: [...issues].slice(-15), lastUserMessage, recentUserMessages: said3.slice(-RECENT_USER_MESSAGES) }
 }
 
 /** The transcript as Haiku reads it. Harness signals are labelled so they are not taken for the user. */
@@ -114,7 +121,8 @@ ${list(f.commits, 'None.')}
 
 ## GitHub Issues Mentioned
 ${f.issues.length ? f.issues.join(', ') : 'None.'}`
-  const all = [numbers, files].filter(Boolean).join('\n')
+  const recent = f.recentUserMessages?.length ? `## Recent User Messages (verbatim, oldest first; check which are still unanswered)\n${f.recentUserMessages.map(m => `- ${m.replace(/\n+/g, ' ')}`).join('\n')}` : ''
+  const all = [numbers, files, recent].filter(Boolean).join('\n\n')
   return withLastMessage ? `${all}\n\n## Last Real User Message (verbatim)\n${f.lastUserMessage ?? 'None found.'}` : all
 }
 
